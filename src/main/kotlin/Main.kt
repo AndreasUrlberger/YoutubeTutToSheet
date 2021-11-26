@@ -14,10 +14,12 @@ import kotlin.random.Random
 
 
 fun main(args: Array<String>) {
-    Main().start()
+    if (args.size < 2)
+        throw IllegalArgumentException("Missing program arguments, needed: 1. path to input file 2. path to where the output file should get stored")
+    Main(args[0], args[1]).start()
 }
 
-class Main {
+class Main(private val filepathInput: String, private val filepathOutput: String) {
     //Instantiating the ImageCodecs class
     val imageCodecs = Imgcodecs()
 
@@ -26,10 +28,6 @@ class Main {
     }
 
     fun start() {
-        val filepathInput =
-            "C:\\Users\\A.Urlberger\\IdeaProjects\\YoutubeTutToSheet\\src\\main\\resources\\sample.png"
-        val filepathOutput =
-            "C:\\Users\\A.Urlberger\\IdeaProjects\\YoutubeTutToSheet\\src\\main\\resources\\output.jpg"
         val img: Mat =
             loadImage(filepathInput) ?: throw FileNotFoundException("Could not load image")
         if (img.empty())
