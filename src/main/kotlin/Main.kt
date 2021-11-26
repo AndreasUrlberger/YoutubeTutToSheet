@@ -4,10 +4,10 @@ import org.opencv.core.CvType
 import org.opencv.core.CvType.CV_32S
 import org.opencv.core.CvType.CV_8UC3
 import org.opencv.core.Mat
-import org.opencv.core.Rect
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
-import org.opencv.imgproc.Imgproc.*
+import org.opencv.imgproc.Imgproc.connectedComponents
+import org.opencv.imgproc.Imgproc.threshold
 import java.awt.Color
 import java.io.FileNotFoundException
 import kotlin.random.Random
