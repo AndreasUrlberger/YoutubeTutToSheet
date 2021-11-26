@@ -1,13 +1,12 @@
 import nu.pattern.OpenCV
+import org.opencv.core.*
+import org.opencv.core.Core.bitwise_and
 import org.opencv.core.Core.split
-import org.opencv.core.CvType
 import org.opencv.core.CvType.CV_32S
 import org.opencv.core.CvType.CV_8UC3
-import org.opencv.core.Mat
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
-import org.opencv.imgproc.Imgproc.connectedComponents
-import org.opencv.imgproc.Imgproc.threshold
+import org.opencv.imgproc.Imgproc.*
 import java.awt.Color
 import java.io.FileNotFoundException
 import kotlin.random.Random
@@ -32,18 +31,95 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             loadImage(filepathInput) ?: throw FileNotFoundException("Could not load image")
         if (img.empty())
             throw FileNotFoundException("Loaded image is empty, probably because it could not be found")
-        val output: Mat = Mat()
+        val output = Mat()
         reshape(img, output, 0.78)
-        hsv(output, output)
+        test3(output, output)
 
 
         saveImage(filepathOutput, output)
     }
 
-    private fun reshape(img: Mat, out: Mat, heightPercentage: Double){
+    private fun reshape(img: Mat, out: Mat, heightPercentage: Double) {
         val height = img.rows()
         val width = img.cols()
         img.submat(0, (height * heightPercentage).toInt(), 0, width).copyTo(out)
+    }
+
+    private fun test3(img: Mat, out: Mat) {
+        val channels: MutableList<Mat> = mutableListOf()
+        split(img, channels)
+
+        val threshBlue = Mat()
+        val threshGreen = Mat()
+        val threshRed = Mat()
+        val limitBlue = 160.0
+        val limitGreen = 160.0
+        val limitRed = 110.0
+        threshold(channels[0], threshBlue, limitBlue, 255.0, THRESH_BINARY)
+        threshold(channels[1], threshGreen, limitGreen, 255.0, THRESH_BINARY)
+        threshold(channels[2], threshRed, limitRed, 255.0, THRESH_BINARY)
+        saveImage("./threshBlue.jpg", threshBlue)
+        saveImage("./threshGreen.jpg", threshGreen)
+        saveImage("./threshRed.jpg", threshRed)
+
+        val addedThresh = Mat()
+        bitwise_and(threshBlue, threshGreen, addedThresh)
+        bitwise_and(addedThresh, threshRed, addedThresh)
+
+        saveImage("./addedThres.jpg", addedThresh)
+
+        val contours = mutableListOf<MatOfPoint>()
+        val hierarchy = Mat()
+        findContours(addedThresh, contours, hierarchy, RETR_LIST, CHAIN_APPROX_NONE)
+        drawContours(img, contours, -1, Scalar(0.0, 0.0, 255.0), 2)
+        img.copyTo(out)
+    }
+
+    private fun test2(img: Mat, out: Mat) {
+        val hsv = Mat()
+        val thresh = Mat()
+        cvtColor(img, hsv, COLOR_BGR2HSV)
+        val channels: MutableList<Mat> = mutableListOf()
+        split(hsv, channels)
+
+        val blur = Mat()
+        GaussianBlur(channels[2], blur, Size(7.0, 7.0), 0.0, 0.0)
+        val cannyBlur = Mat()
+        Canny(blur, cannyBlur, 230.0, 230.0)
+        saveImage("./cannyBlur.jpg", cannyBlur)
+
+        val hueBlur = Mat()
+        GaussianBlur(channels[2], hueBlur, Size(7.0, 7.0), 0.0, 0.0)
+        threshold(hueBlur, thresh, 128.0, 255.0, THRESH_BINARY)
+        saveImage("./thresh.jpg", thresh)
+        saveImage("./channel.jpg", channels[2])
+
+
+        val contours = mutableListOf<MatOfPoint>()
+        val hierarchy = Mat()
+        findContours(thresh, contours, hierarchy, RETR_EXTERNAL, CHAIN_APPROX_NONE)
+        drawContours(img, contours, -1, Scalar(0.0, 0.0, 255.0), Core.FILLED)
+        img.copyTo(out)
+    }
+
+    private fun test(img: Mat, out: Mat) {
+        val hsv = Mat()
+        val thresh = Mat()
+        cvtColor(img, hsv, COLOR_BGR2HSV)
+        val channels: MutableList<Mat> = mutableListOf()
+        split(hsv, channels)
+        threshold(channels[2], thresh, 128.0, 255.0, THRESH_BINARY)
+
+        /*val gray: Mat = Mat()
+        val thresh: Mat = Mat()
+        cvtColor(img, gray, COLOR_BGR2GRAY)
+        threshold(gray, thresh, 170.0, 255.0, THRESH_BINARY)*/
+        val contours = mutableListOf<MatOfPoint>()
+        val hierarchy = Mat()
+        findContours(thresh, contours, hierarchy, RETR_EXTERNAL, CHAIN_APPROX_NONE)
+        println(hierarchy)
+        drawContours(img, contours, -1, Scalar(0.0, 0.0, 255.0), 2)
+        img.copyTo(out)
     }
 
     private fun hsv(img: Mat, out: Mat) {
@@ -67,7 +143,13 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         for (r in 0 until dst.rows()) {
             for (c in 0 until dst.cols()) {
                 val label: Int = labelImage.get(r, c).first().toInt()
-                dst.put(r, c, colors[label].red.toDouble(), colors[label].green.toDouble(), colors[label].blue.toDouble())
+                dst.put(
+                    r,
+                    c,
+                    colors[label].red.toDouble(),
+                    colors[label].green.toDouble(),
+                    colors[label].blue.toDouble()
+                )
             }
         }
 
