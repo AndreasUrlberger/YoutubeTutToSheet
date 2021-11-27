@@ -37,7 +37,8 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         val output = Mat()
         reshape(img, output, 0.78)
         //sliceAndConquerWhiteKeys(output, output)
-        initKeys('a', -3, 'c', 5)
+        val keys = mutableListOf<Pair<Double, Double>>()
+        val whiteKeys = initKeys('a', -3, 'c', 5, keys)
 
         saveImage(filepathOutput, output)
     }
@@ -48,8 +49,61 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         img.submat(0, (height * heightPercentage).toInt(), 0, width).copyTo(out)
     }
 
-    private fun initKeys(keyLow: Char, lowNum: Int, keyHigh: Char, highNum: Int) {
-        val keyCodes = mapOf('a' to 10, 'h' to 12, 'c' to 1, 'd' to 3, 'e' to 5, 'f' to 6, 'g' to 8)
+    private fun initKeys(
+        keyLow: Char,
+        lowNum: Int,
+        keyHigh: Char,
+        highNum: Int,
+        outKeys: MutableList<Pair<Double, Double>>
+    ): Int {
+        val keyCodes = mapOf('a' to 9, 'h' to 11, 'c' to 0, 'd' to 2, 'e' to 4, 'f' to 5, 'g' to 7)
+        checkBorderKeys(lowNum, highNum, keyLow, keyHigh)
+
+        val keyDimensions = listOf(
+            Triple(0.0, 0.9, 1), // c
+            Triple(0.9, 0.9, 0), // cis
+            Triple(1.8, 0.9, 1), // d
+            Triple(2.7, 0.95, 0), // dis
+            Triple(3.65, 0.95, 1), // e
+            Triple(4.6, 0.95, 1), // f
+            Triple(5.55, 0.95, 0), // fis
+            Triple(0.55, 0.5, 1), // g
+            Triple(1.65, 0.5, 0), // gis
+            Triple(3.25, 0.5, 1), // a
+            Triple(4.35, 0.5, 0), // ais
+            Triple(5.45, 0.5, 1), // h
+        )
+
+        var whiteKeys = 0
+        var xOffset = 0.0
+        // lower single keys
+        for (key in (keyCodes[keyLow] ?: 0)..(keyCodes.values.maxOrNull() ?: 0)) {
+            val dim = keyDimensions[key]
+            outKeys.add(Pair(xOffset, xOffset + dim.second))
+            xOffset += dim.second
+            whiteKeys += dim.third
+        }
+        // octave keys
+        for (scale in (lowNum + 1) until highNum) {
+            for (key in keyDimensions.indices) {
+                val dim = keyDimensions[key]
+                outKeys.add(Pair(xOffset, xOffset + dim.second))
+                xOffset += dim.second
+                whiteKeys += dim.third
+            }
+        }
+        // upper single keys
+        for (key in (keyCodes.values.minOrNull() ?: 0)..(keyCodes[keyHigh] ?: 0)) {
+            val dim = keyDimensions[key]
+            outKeys.add(Pair(xOffset, xOffset + dim.second))
+            xOffset += dim.second
+            whiteKeys += dim.third
+        }
+
+        return whiteKeys
+    }
+
+    private fun checkBorderKeys(lowNum: Int, highNum: Int, keyLow: Char, keyHigh: Char) {
         if (lowNum !in -3..5)
             throw java.lang.IllegalArgumentException("lowNum is out of range [-3-4]")
         if (highNum !in -3..5)
@@ -60,86 +114,6 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             throw java.lang.IllegalArgumentException("keyLow must be one of [a, h, c, d, e, f, g]")
         if (!listOf('a', 'h', 'c', 'd', 'e', 'f', 'g').contains(keyHigh.lowercaseChar()))
             throw java.lang.IllegalArgumentException("keyHigh must be one of [a, h, c, d, e, f, g]")
-
-        val cR = Pair(0.0, 0.9)
-        val dR = Pair(0.9, 0.9)
-        val eR = Pair(1.8, 0.9)
-        val fR = Pair(2.7, 0.95)
-        val gR = Pair(3.65, 0.95)
-        val aR = Pair(4.6, 0.95)
-        val hR = Pair(5.55, 0.95)
-        val cisR = Pair(0.55, 0.5)
-        val disR = Pair(1.65, 0.5)
-        val fisR = Pair(3.25, 0.5)
-        val gisR = Pair(4.35, 0.5)
-        val aisR = Pair(5.45, 0.5)
-
-        val keyCount = (highNum - lowNum) * 12 +
-                keyCodes.getOrDefault(keyHigh.lowercaseChar(), 0) -
-                keyCodes.getOrDefault(keyLow.lowercaseChar(), 0) + 1
-        val keys = mutableListOf<Pair<Int, Int>>()
-        println("keyCount: $keyCount")
-
-    }
-
-
-    private fun sliceAndConquerBlackKeys(img: Mat, out: Mat) {
-        val whiteWidthThreshold = 25.0
-        val whiteNotes = 52
-        val whiteKeyThickness = img.width().toDouble() / whiteNotes
-        val octaveWidth = whiteKeyThickness * 7
-        val channels: MutableList<Mat> = mutableListOf()
-        val contours = mutableListOf<MatOfPoint>()
-        val hierarchy = Mat()
-        val points = mutableMapOf<Int, MutableList<Pair<Point, Point>>>()
-
-        for (sliceIndex in 0 until whiteNotes) {
-            contours.clear()
-            channels.clear()
-            val slice = img.submat(
-                0,
-                img.height(),
-                (sliceIndex * whiteKeyThickness).roundToInt(),
-                ((sliceIndex + 1) * whiteKeyThickness).roundToInt()
-            )
-            //saveImage("./slice.jpg", slice)
-
-            split(slice, channels)
-            val addedThresh = computeAddedThresh(channels)
-            //saveImage("./addedSliceThresh.jpg", addedThresh)
-            findContours(addedThresh, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE)
-
-            for (x in 0 until hierarchy.width()) {
-                for (y in 0 until hierarchy.height()) {
-                    val entry = hierarchy.get(y, x)
-                    /*val next = entry[0]
-                    val previous = entry[1]
-                    val firstChild = entry[2]*/
-                    val parent = entry[3]
-                    if (parent.toInt() != -1) {
-                        //drawContours(slice, contours, x, Scalar(0.0, 0.0, 255.0), 2)
-                        val foundPoints = findMinMaxPoint(contours[x])
-                        foundPoints.first.x += sliceIndex * whiteKeyThickness
-                        foundPoints.second.x += sliceIndex * whiteKeyThickness
-                        if (foundPoints.first.x - foundPoints.second.x >= whiteWidthThreshold) {
-                            points.getOrPut(x) { mutableListOf() }.add(foundPoints)
-                        }
-                    }
-                }
-            }
-        }
-
-        for (key in points.keys) {
-            val item = points.getOrDefault(key, mutableListOf())
-            for (y in 0 until item.size) {
-                val notesInLine = item[y]
-                println("width of note: ${notesInLine.first.x - notesInLine.second.x}")
-                rectangle(img, notesInLine.first, notesInLine.second, Scalar(0.0, 0.0, 255.0), 2)
-            }
-        }
-
-        saveImage("./notes.jpg", img)
-        img.copyTo(out)
     }
 
     private fun sliceAndConquerWhiteKeys(img: Mat, out: Mat) {
