@@ -7,8 +7,9 @@ import org.opencv.core.CvType.CV_8UC3
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
 import org.opencv.imgproc.Imgproc.*
+import org.opencv.videoio.VideoCapture
+import org.opencv.videoio.VideoWriter
 import java.awt.Color
-import java.io.FileNotFoundException
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -29,8 +30,33 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         OpenCV.loadLocally()
     }
 
+    private fun convertVideo() {
+        val start = System.currentTimeMillis()
+        val cap = VideoCapture(filepathInput)
+        val fourcc = VideoWriter.fourcc('X', 'V', 'I', 'D')
+        val vw = VideoWriter(filepathOutput, fourcc, 30.0, Size(1920.0, 1080.0))
+        var i = 0
+        val frame = Mat()
+        val out = Mat()
+        var hasNext = true
+        while (cap.isOpened && hasNext) {
+            println("reading frame $i")
+            hasNext = cap.read(frame)
+            if (!hasNext)
+                break
+            sliceAndConquer(frame, out)
+            vw.write(out)
+            i += 1
+        }
+        cap.release()
+        vw.release()
+        val end = System.currentTimeMillis()
+        println("time needed: ${end - start} ms")
+    }
+
     fun start() {
-        val img: Mat =
+        convertVideo()
+        /*val img: Mat =
             loadImage(filepathInput) ?: throw FileNotFoundException("Could not load image")
         if (img.empty())
             throw FileNotFoundException("Loaded image is empty, probably because it could not be found")
@@ -38,15 +64,10 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         val start = System.currentTimeMillis()
         //reshape(img, output, 0.78)
         sliceAndConquer(img, output)
-        /*val channels = mutableListOf<Mat>()
-        split(img, channels)
-        saveImage("./channel1.png", channels[0])
-        val weights = doubleArrayOf(100.0, 100.0, 100.0)
-        computeAddedThresh(channels, weights).copyTo(output)*/
 
         val end = System.currentTimeMillis()
         println("time: ${end - start}ms")
-        saveImage(filepathOutput, output)
+        saveImage(filepathOutput, output)*/
     }
 
     private fun reshape(img: Mat, out: Mat, heightPercentage: Double) {
@@ -148,7 +169,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         val hierarchy = Mat()
         val points = mutableMapOf<Int, MutableList<Pair<Point, Point>>>()
         val pixelsPerInch = img.width() / keyboardWidth
-        println("keyboardWidth: $keyboardWidth, width: ${img.width()} pixesPerInch: $pixelsPerInch")
+        //println("keyboardWidth: $keyboardWidth, width: ${img.width()} pixesPerInch: $pixelsPerInch")
 
         val keyBorders = keys.asSequence().map { old ->
             Pair(
@@ -156,8 +177,8 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                 ((old.second * pixelsPerInch).coerceAtMost(img.width().toDouble()))
             )
         }
-        println("keys: ${keyBorders.joinToString(", ")} ")
-        println("relative: ${keys.joinToString(separator = ", ")}}")
+        //println("keys: ${keyBorders.joinToString(", ")} ")
+        //println("relative: ${keys.joinToString(separator = ", ")}}")
 
         var sliceIndex = 0
         for (border in keyBorders) {
@@ -168,30 +189,27 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             val slice = img.submat(
                 0,
                 img.height(),
-                (border.first - width * 0.1).roundToInt().coerceAtMost(img.width())
+                (border.first - width * 0.2).roundToInt().coerceAtMost(img.width())
                     .coerceAtLeast(0),
-                (border.second + width * 0.1).roundToInt().coerceAtMost(img.width())
+                (border.second + width * 0.2).roundToInt().coerceAtMost(img.width())
                     .coerceAtLeast(0)
             )
 
             split(slice, channels)
-            val weights = doubleArrayOf(100.0, 100.0, 100.0)
+            val weights = doubleArrayOf(90.0, 90.0, 90.0)
             val addedThresh = computeAddedThresh(channels, weights)
-            saveImage("./slices/slice_$sliceIndex.jpg", addedThresh)
+            //saveImage("./slices/slice_$sliceIndex.jpg", addedThresh)
             findContours(addedThresh, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE)
 
             for (x in 0 until hierarchy.width()) {
                 for (y in 0 until hierarchy.height()) {
+                    // entry = (next, previous, firstChild, parent)
                     val entry = hierarchy.get(y, x)
-                    /*val next = entry[0]
-                    val previous = entry[1]
-                    val firstChild = entry[2]*/
                     val parent = entry[3]
                     if (parent.toInt() != -1) {
-                        //drawContours(slice, contours, x, Scalar(0.0, 0.0, 255.0), 2)
                         val foundPoints = findMinMaxPoint(contours[x])
-                        foundPoints.first.x += border.first - width * 0.1
-                        foundPoints.second.x += border.first - width * 0.1
+                        foundPoints.first.x += border.first - width * 0.2
+                        foundPoints.second.x += border.first - width * 0.2
                         if (foundPoints.first.x - foundPoints.second.x >= widthThreshold) {
                             points.getOrPut(x) { mutableListOf() }.add(foundPoints)
                         }
@@ -205,12 +223,12 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             val item = points.getOrDefault(key, mutableListOf())
             for (y in 0 until item.size) {
                 val notesInLine = item[y]
-                println("width of note: ${notesInLine.first.x - notesInLine.second.x}")
+                //println("width of note: ${notesInLine.first.x - notesInLine.second.x}")
                 rectangle(img, notesInLine.first, notesInLine.second, Scalar(0.0, 0.0, 255.0), 3)
             }
         }
 
-        saveImage("./notes.jpg", img)
+        //saveImage("./notes.jpg", img)
         img.copyTo(out)
     }
 
