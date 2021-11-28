@@ -10,6 +10,7 @@ import org.opencv.imgproc.Imgproc.*
 import org.opencv.videoio.VideoCapture
 import org.opencv.videoio.VideoWriter
 import java.awt.Color
+import java.io.FileNotFoundException
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -30,44 +31,53 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         OpenCV.loadLocally()
     }
 
+    fun start() {
+        //convertVideo()
+        testImg()
+    }
+
     private fun convertVideo() {
         val start = System.currentTimeMillis()
         val cap = VideoCapture(filepathInput)
-        val fourcc = VideoWriter.fourcc('X', 'V', 'I', 'D')
-        val vw = VideoWriter(filepathOutput, fourcc, 30.0, Size(1920.0, 1080.0))
-        var i = 0
         val frame = Mat()
         val out = Mat()
-        var hasNext = true
-        while (cap.isOpened && hasNext) {
-            println("reading frame $i")
-            hasNext = cap.read(frame)
-            if (!hasNext)
-                break
-            sliceAndConquer(frame, out)
-            vw.write(out)
-            i += 1
+        val cut = Mat()
+        cap.read(frame)
+        var i = 1
+        if (!frame.empty()) {
+            reshape(frame, cut, 0.75)
+            val size = Size(cut.width().toDouble(), cut.height().toDouble())
+            val fourcc = VideoWriter.fourcc('X', 'V', 'I', 'D')
+            val vw = VideoWriter(filepathOutput, fourcc, 30.0, size)
+            do {
+                println("reading frame $i")
+                reshape(frame, cut, 0.75)
+                sliceAndConquer(cut, out)
+                vw.write(out)
+
+                i += 1
+                cap.read(frame)
+            } while (cap.isOpened && !frame.empty())
+            vw.release()
         }
         cap.release()
-        vw.release()
         val end = System.currentTimeMillis()
         println("time needed: ${end - start} ms")
     }
 
-    fun start() {
-        convertVideo()
-        /*val img: Mat =
+    private fun testImg() {
+        val img: Mat =
             loadImage(filepathInput) ?: throw FileNotFoundException("Could not load image")
         if (img.empty())
             throw FileNotFoundException("Loaded image is empty, probably because it could not be found")
         val output = Mat()
         val start = System.currentTimeMillis()
-        //reshape(img, output, 0.78)
+        reshape(img, output, 0.78)
         sliceAndConquer(img, output)
 
         val end = System.currentTimeMillis()
         println("time: ${end - start}ms")
-        saveImage(filepathOutput, output)*/
+        saveImage(filepathOutput, output)
     }
 
     private fun reshape(img: Mat, out: Mat, heightPercentage: Double) {
@@ -169,7 +179,6 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         val hierarchy = Mat()
         val points = mutableMapOf<Int, MutableList<Pair<Point, Point>>>()
         val pixelsPerInch = img.width() / keyboardWidth
-        //println("keyboardWidth: $keyboardWidth, width: ${img.width()} pixesPerInch: $pixelsPerInch")
 
         val keyBorders = keys.asSequence().map { old ->
             Pair(
@@ -177,6 +186,8 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                 ((old.second * pixelsPerInch).coerceAtMost(img.width().toDouble()))
             )
         }
+        val white = Scalar(255.0, 255.0, 255.0)
+        line(img, Point(0.0, 0.0), Point(img.width().toDouble(), 0.0), white, 1)
         //println("keys: ${keyBorders.joinToString(", ")} ")
         //println("relative: ${keys.joinToString(separator = ", ")}}")
 
@@ -185,21 +196,22 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             contours.clear()
             channels.clear()
             val width = (border.second - border.first)
-            val widthThreshold = width * 0.7
+            val widthThreshold = width * 0.55
             val slice = img.submat(
-                0,
-                img.height(),
-                (border.first - width * 0.2).roundToInt().coerceAtMost(img.width())
-                    .coerceAtLeast(0),
-                (border.second + width * 0.2).roundToInt().coerceAtMost(img.width())
-                    .coerceAtLeast(0)
+                0, img.height(),
+                (border.first - width * 0.2).roundToInt().coerceIn(0, img.width()),
+                (border.second + width * 0.2).roundToInt().coerceIn(0, img.width())
             )
 
             split(slice, channels)
-            val weights = doubleArrayOf(90.0, 90.0, 90.0)
+            val weights = doubleArrayOf(80.0, 85.0, 80.0)
             val addedThresh = computeAddedThresh(channels, weights)
-            //saveImage("./slices/slice_$sliceIndex.jpg", addedThresh)
             findContours(addedThresh, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE)
+            saveImage("./slices/slice_$sliceIndex.jpg", slice)
+            saveImage("./slices/slice_${sliceIndex}a.jpg", addedThresh)
+            saveImage("./slices/slice_${sliceIndex}a0.jpg", channels[0])
+            saveImage("./slices/slice_${sliceIndex}a1.jpg", channels[1])
+            saveImage("./slices/slice_${sliceIndex}a2.jpg", channels[2])
 
             for (x in 0 until hierarchy.width()) {
                 for (y in 0 until hierarchy.height()) {
