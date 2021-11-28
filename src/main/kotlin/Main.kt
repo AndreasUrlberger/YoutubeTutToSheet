@@ -36,9 +36,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             throw FileNotFoundException("Loaded image is empty, probably because it could not be found")
         val output = Mat()
         reshape(img, output, 0.78)
-        //sliceAndConquerWhiteKeys(output, output)
-        val keys = mutableListOf<Pair<Double, Double>>()
-        val whiteKeys = initKeys('a', -3, 'c', 5, keys)
+        sliceAndConquer(output, output)
 
         saveImage(filepathOutput, output)
     }
@@ -55,52 +53,70 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         keyHigh: Char,
         highNum: Int,
         outKeys: MutableList<Pair<Double, Double>>
-    ): Int {
+    ): Pair<Int, Double> {
         val keyCodes = mapOf('a' to 9, 'h' to 11, 'c' to 0, 'd' to 2, 'e' to 4, 'f' to 5, 'g' to 7)
         checkBorderKeys(lowNum, highNum, keyLow, keyHigh)
 
         val keyDimensions = listOf(
-            Triple(0.0, 0.9, 1), // c
-            Triple(0.9, 0.9, 0), // cis
-            Triple(1.8, 0.9, 1), // d
-            Triple(2.7, 0.95, 0), // dis
-            Triple(3.65, 0.95, 1), // e
-            Triple(4.6, 0.95, 1), // f
-            Triple(5.55, 0.95, 0), // fis
-            Triple(0.55, 0.5, 1), // g
-            Triple(1.65, 0.5, 0), // gis
-            Triple(3.25, 0.5, 1), // a
-            Triple(4.35, 0.5, 0), // ais
-            Triple(5.45, 0.5, 1), // h
+            // (left position relative to the start of last octave, width of the key, isWhiteKey)
+            Triple(0.0, 0.9, true), // c
+            // (left position relative to end of last white key, same for the right position, isWhiteKey)
+            Triple(-0.35, 0.15, false), // cis
+            Triple(0.9, 0.9, true), // d
+            Triple(-0.15, 0.35, false), // dis
+            Triple(1.8, 0.9, true), // e
+            Triple(2.7, 0.95, true), // f
+            Triple(-0.4, 0.1, false), // fis
+            Triple(3.65, 0.95, true), // g
+            Triple(-0.25, 0.25, false), // gis
+            Triple(4.6, 0.95, true), // a
+            Triple(-0.1, 0.4, false), // ais
+            Triple(5.55, 0.95, true), // h
         )
 
         var whiteKeys = 0
         var xOffset = 0.0
+        var width = 0.0
         // lower single keys
         for (key in (keyCodes[keyLow] ?: 0)..(keyCodes.values.maxOrNull() ?: 0)) {
             val dim = keyDimensions[key]
-            outKeys.add(Pair(xOffset, xOffset + dim.second))
-            xOffset += dim.second
-            whiteKeys += dim.third
+            if (dim.third) { // white key
+                outKeys.add(Pair(xOffset, xOffset + dim.second))
+                xOffset += dim.second
+                whiteKeys++
+                width += dim.second
+            } else {
+                outKeys.add(Pair(xOffset + dim.first, xOffset + dim.second))
+            }
         }
         // octave keys
         for (scale in (lowNum + 1) until highNum) {
             for (key in keyDimensions.indices) {
                 val dim = keyDimensions[key]
-                outKeys.add(Pair(xOffset, xOffset + dim.second))
-                xOffset += dim.second
-                whiteKeys += dim.third
+                if (dim.third) { // white key
+                    outKeys.add(Pair(xOffset, xOffset + dim.second))
+                    xOffset += dim.second
+                    whiteKeys++
+                    width += dim.second
+                } else {
+                    outKeys.add(Pair(xOffset + dim.first, xOffset + dim.second))
+                }
             }
         }
         // upper single keys
         for (key in (keyCodes.values.minOrNull() ?: 0)..(keyCodes[keyHigh] ?: 0)) {
             val dim = keyDimensions[key]
-            outKeys.add(Pair(xOffset, xOffset + dim.second))
-            xOffset += dim.second
-            whiteKeys += dim.third
+            if (dim.third) { // white key
+                outKeys.add(Pair(xOffset, xOffset + dim.second))
+                xOffset += dim.second
+                whiteKeys++
+                width += dim.second
+            } else {
+                outKeys.add(Pair(xOffset + dim.first, xOffset + dim.second))
+            }
         }
 
-        return whiteKeys
+        return Pair(whiteKeys, width)
     }
 
     private fun checkBorderKeys(lowNum: Int, highNum: Int, keyLow: Char, keyHigh: Char) {
@@ -116,24 +132,38 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             throw java.lang.IllegalArgumentException("keyHigh must be one of [a, h, c, d, e, f, g]")
     }
 
-    private fun sliceAndConquerWhiteKeys(img: Mat, out: Mat) {
-        val whiteWidthThreshold = 25.0
-        val whiteNotes = 52
+    private fun sliceAndConquer(img: Mat, out: Mat) {
+        val keys = mutableListOf<Pair<Double, Double>>()
+        val (whiteNotes, keyboardWidth) = initKeys('a', -3, 'c', 5, keys)
         val sliceThickness = img.width().toDouble() / whiteNotes
         val channels: MutableList<Mat> = mutableListOf()
         val contours = mutableListOf<MatOfPoint>()
         val hierarchy = Mat()
         val points = mutableMapOf<Int, MutableList<Pair<Point, Point>>>()
+        val pixelsPerInch = img.width() / keyboardWidth
+        println("keyboardWidth: $keyboardWidth, width: ${img.width()} pixesPerInch: $pixelsPerInch")
 
-        for (sliceIndex in 0 until whiteNotes) {
+        val keyBorders = keys.asSequence().map { old ->
+            Pair(
+                old.first * pixelsPerInch,
+                ((old.second * pixelsPerInch).coerceAtMost(img.width().toDouble()))
+            )
+        }
+        println("keys: ${keyBorders.joinToString(", ")} ")
+        println("relative: ${keys.joinToString(separator = ", ")}}")
+
+        var sliceIndex = 0
+        for (border in keyBorders) {
             contours.clear()
             channels.clear()
             val slice = img.submat(
                 0,
                 img.height(),
-                (sliceIndex * sliceThickness).roundToInt(),
-                ((sliceIndex + 1) * sliceThickness).roundToInt()
+                border.first.roundToInt(),
+                border.second.roundToInt()
             )
+            val widthThreshold = (border.second - border.first) * 0.7
+            saveImage("./slices/slice_$sliceIndex.jpg", slice)
             //saveImage("./slice.jpg", slice)
 
             split(slice, channels)
@@ -151,14 +181,15 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                     if (parent.toInt() != -1) {
                         //drawContours(slice, contours, x, Scalar(0.0, 0.0, 255.0), 2)
                         val foundPoints = findMinMaxPoint(contours[x])
-                        foundPoints.first.x += sliceIndex * sliceThickness
-                        foundPoints.second.x += sliceIndex * sliceThickness
-                        if (foundPoints.first.x - foundPoints.second.x >= whiteWidthThreshold) {
+                        foundPoints.first.x += border.first
+                        foundPoints.second.x += border.first
+                        if (foundPoints.first.x - foundPoints.second.x >= widthThreshold) {
                             points.getOrPut(x) { mutableListOf() }.add(foundPoints)
                         }
                     }
                 }
             }
+            sliceIndex++
         }
 
         for (key in points.keys) {
@@ -307,28 +338,6 @@ class Main(private val filepathInput: String, private val filepathOutput: String
 //        for(int label = 1; label < nLabels; ++label){
 //            colors[label] = Vec3b( (rand()&255), (rand()&255), (rand()&255) );
 //        }
-    }
-
-    private fun convolFilter(image: Mat, output: Mat) {
-        // Create a kernel that we will use to sharpen our image
-        val kernel = Mat(3, 3, CvType.CV_32F)
-        // an approximation of second derivative, a quite strong kernel
-        val kernelData = FloatArray((kernel.total() * kernel.channels()).toInt())
-        kernelData[0] = 1f
-        kernelData[1] = 1f
-        kernelData[2] = 1f
-        kernelData[3] = 1f
-        kernelData[4] = -8f
-        kernelData[5] = 1f
-        kernelData[6] = 1f
-        kernelData[7] = 1f
-        kernelData[8] = 1f
-        kernel.put(0, 0, kernelData)
-        Imgproc.filter2D(image, output, 8, kernel)
-    }
-
-    private fun applySobel(input: Mat, output: Mat) {
-        Imgproc.Sobel(input, output, -1, 0, 1)
     }
 
     private fun loadImage(imagePath: String): Mat? {
