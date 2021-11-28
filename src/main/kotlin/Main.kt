@@ -35,9 +35,17 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         if (img.empty())
             throw FileNotFoundException("Loaded image is empty, probably because it could not be found")
         val output = Mat()
-        reshape(img, output, 0.78)
-        sliceAndConquer(output, output)
+        val start = System.currentTimeMillis()
+        //reshape(img, output, 0.78)
+        sliceAndConquer(img, output)
+        /*val channels = mutableListOf<Mat>()
+        split(img, channels)
+        saveImage("./channel1.png", channels[0])
+        val weights = doubleArrayOf(100.0, 100.0, 100.0)
+        computeAddedThresh(channels, weights).copyTo(output)*/
 
+        val end = System.currentTimeMillis()
+        println("time: ${end - start}ms")
         saveImage(filepathOutput, output)
     }
 
@@ -135,7 +143,6 @@ class Main(private val filepathInput: String, private val filepathOutput: String
     private fun sliceAndConquer(img: Mat, out: Mat) {
         val keys = mutableListOf<Pair<Double, Double>>()
         val (whiteNotes, keyboardWidth) = initKeys('a', -3, 'c', 5, keys)
-        val sliceThickness = img.width().toDouble() / whiteNotes
         val channels: MutableList<Mat> = mutableListOf()
         val contours = mutableListOf<MatOfPoint>()
         val hierarchy = Mat()
@@ -156,19 +163,21 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         for (border in keyBorders) {
             contours.clear()
             channels.clear()
+            val width = (border.second - border.first)
+            val widthThreshold = width * 0.7
             val slice = img.submat(
                 0,
                 img.height(),
-                border.first.roundToInt(),
-                border.second.roundToInt()
+                (border.first - width * 0.1).roundToInt().coerceAtMost(img.width())
+                    .coerceAtLeast(0),
+                (border.second + width * 0.1).roundToInt().coerceAtMost(img.width())
+                    .coerceAtLeast(0)
             )
-            val widthThreshold = (border.second - border.first) * 0.7
-            saveImage("./slices/slice_$sliceIndex.jpg", slice)
-            //saveImage("./slice.jpg", slice)
 
             split(slice, channels)
-            val addedThresh = computeAddedThresh(channels)
-            //saveImage("./addedSliceThresh.jpg", addedThresh)
+            val weights = doubleArrayOf(100.0, 100.0, 100.0)
+            val addedThresh = computeAddedThresh(channels, weights)
+            saveImage("./slices/slice_$sliceIndex.jpg", addedThresh)
             findContours(addedThresh, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE)
 
             for (x in 0 until hierarchy.width()) {
@@ -181,8 +190,8 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                     if (parent.toInt() != -1) {
                         //drawContours(slice, contours, x, Scalar(0.0, 0.0, 255.0), 2)
                         val foundPoints = findMinMaxPoint(contours[x])
-                        foundPoints.first.x += border.first
-                        foundPoints.second.x += border.first
+                        foundPoints.first.x += border.first - width * 0.1
+                        foundPoints.second.x += border.first - width * 0.1
                         if (foundPoints.first.x - foundPoints.second.x >= widthThreshold) {
                             points.getOrPut(x) { mutableListOf() }.add(foundPoints)
                         }
@@ -197,7 +206,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             for (y in 0 until item.size) {
                 val notesInLine = item[y]
                 println("width of note: ${notesInLine.first.x - notesInLine.second.x}")
-                rectangle(img, notesInLine.first, notesInLine.second, Scalar(0.0, 0.0, 255.0), 2)
+                rectangle(img, notesInLine.first, notesInLine.second, Scalar(0.0, 0.0, 255.0), 3)
             }
         }
 
@@ -223,7 +232,8 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         val channels: MutableList<Mat> = mutableListOf()
         split(img, channels)
 
-        val addedThresh = computeAddedThresh(channels)
+        val weights = doubleArrayOf(110.0, 160.0, 160.0)
+        val addedThresh = computeAddedThresh(channels, weights)
 
         saveImage("./addedThres.jpg", addedThresh)
 
@@ -234,19 +244,22 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         img.copyTo(out)
     }
 
-    private fun computeAddedThresh(channels: MutableList<Mat>): Mat {
+    private fun computeAddedThresh(channels: MutableList<Mat>, weights: DoubleArray): Mat {
+        if (weights.size < 3) {
+            throw IllegalArgumentException("size of weights must be exactly 3")
+        }
         val threshBlue = Mat()
         val threshGreen = Mat()
         val threshRed = Mat()
-        val limitBlue = 160.0
-        val limitGreen = 160.0
-        val limitRed = 110.0
+        val limitBlue = weights[2]
+        val limitGreen = weights[1]
+        val limitRed = weights[0]
         threshold(channels[0], threshBlue, limitBlue, 255.0, THRESH_BINARY)
         threshold(channels[1], threshGreen, limitGreen, 255.0, THRESH_BINARY)
         threshold(channels[2], threshRed, limitRed, 255.0, THRESH_BINARY)
-        saveImage("./threshBlue.jpg", threshBlue)
+        /*saveImage("./threshBlue.jpg", threshBlue)
         saveImage("./threshGreen.jpg", threshGreen)
-        saveImage("./threshRed.jpg", threshRed)
+        saveImage("./threshRed.jpg", threshRed)*/
 
         val addedThresh = Mat()
         bitwise_and(threshBlue, threshGreen, addedThresh)
