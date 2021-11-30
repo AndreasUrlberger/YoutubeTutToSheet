@@ -1,20 +1,14 @@
 import nu.pattern.OpenCV
-import org.opencv.core.*
 import org.opencv.core.Core.bitwise_and
 import org.opencv.core.Core.split
-import org.opencv.core.CvType.CV_32S
-import org.opencv.core.CvType.CV_8UC3
+import org.opencv.core.Mat
+import org.opencv.core.MatOfPoint
+import org.opencv.core.Point
+import org.opencv.core.Scalar
 import org.opencv.imgcodecs.Imgcodecs
-import org.opencv.imgproc.Imgproc
 import org.opencv.imgproc.Imgproc.*
 import org.opencv.videoio.VideoCapture
-import org.opencv.videoio.VideoWriter
-import java.awt.Color
-import java.io.FileNotFoundException
-import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.roundToInt
-import kotlin.random.Random
 import kotlin.system.measureTimeMillis
 
 // -XX:ParallelGCThreads=1
@@ -34,53 +28,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
     }
 
     fun start() {
-        //convertVideo()
-        //testImg()
         detectNotesInVideo()
-    }
-
-    private fun convertVideo() {
-        val start = System.currentTimeMillis()
-        val cap = VideoCapture(filepathInput)
-        val frame = Mat()
-        val out = Mat()
-        val cut = Mat()
-        cap.read(frame)
-        var i = 1
-        if (!frame.empty()) {
-            reshape(frame, cut, 0.75)
-            val size = Size(cut.width().toDouble(), cut.height().toDouble())
-            val fourcc = VideoWriter.fourcc('X', 'V', 'I', 'D')
-            val vw = VideoWriter(filepathOutput, fourcc, 30.0, size)
-            do {
-                println("reading frame $i")
-                reshape(frame, cut, 0.75)
-                sliceAndConquer(cut, out)
-                vw.write(out)
-
-                i += 1
-                cap.read(frame)
-            } while (cap.isOpened && !frame.empty())
-            vw.release()
-        }
-        cap.release()
-        val end = System.currentTimeMillis()
-        println("time needed: ${end - start} ms")
-    }
-
-    private fun testImg() {
-        val img: Mat =
-            loadImage(filepathInput) ?: throw FileNotFoundException("Could not load image")
-        if (img.empty())
-            throw FileNotFoundException("Loaded image is empty, probably because it could not be found")
-        val output = Mat()
-        val start = System.currentTimeMillis()
-        reshape(img, output, 0.78)
-        sliceAndConquer(img, output)
-
-        val end = System.currentTimeMillis()
-        println("time: ${end - start}ms")
-        saveImage(filepathOutput, output)
     }
 
     private fun reshape(img: Mat, out: Mat, heightPercentage: Double) {
@@ -180,12 +128,14 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             val notes = mutableListOf<Map<Int, List<Pair<Double, Double>>>>()
             val frame = Mat()
             val cut = Mat()
+            var keyCount = 0
 
             cap.read(frame)
             var counter = 0
             if (!frame.empty()) {
                 val keys = mutableListOf<Pair<Double, Double>>()
                 val (_, keyboardWidth) = initKeys('a', -3, 'c', 5, keys)
+                keyCount = keys.size
                 val pixelsPerInch = frame.width() / keyboardWidth
                 val keyBorders = keys.asSequence().map { old ->
                     Pair(
@@ -204,8 +154,97 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                 }
             }
             cap.release()
+
+            convertNotesToTimestamps(notes, keyCount)
         }
         println("time needed: $millis ms")
+    }
+
+    private fun convertNotesToTimestamps(
+        notes: List<Map<Int, List<Pair<Double, Double>>>>,
+        keyCount: Int
+    ) {
+        val keyFocused = convertIntoKeyFocused(notes, keyCount)
+        val speed = estimateSpeed(notes)
+        if (speed <= 0) {
+            throw RuntimeException("Could not get a valid speed from notes, speed: $speed")
+        }
+        println("speed $speed")
+    }
+
+    private fun convertIntoKeyFocused(
+        notes: List<Map<Int, List<Pair<Double, Double>>>>,
+        keyCount: Int
+    ): List<List<List<Pair<Double, Double>>>> {
+        // Structure: Key: frame: notes: note
+        val frameCount = notes.size
+        val keyFocused = mutableListOf<MutableList<MutableList<Pair<Double, Double>>>>()
+        for (k in 0 until keyCount) {
+            val keyList = mutableListOf<MutableList<Pair<Double, Double>>>()
+            for (f in 0 until frameCount) {
+                keyList.add(mutableListOf())
+            }
+            keyFocused.add(keyList)
+        }
+
+        notes.forEachIndexed { fIndex, frame ->
+            frame.forEach { (kIndex, key) ->
+                key.sortedBy { note -> note.second }.forEach { note ->
+                    keyFocused[kIndex][fIndex].add(note)
+                }
+            }
+        }
+
+        return keyFocused
+    }
+
+    /**
+     * If speed is negative then it is invalid.
+     */
+    private fun estimateSpeed(notes: List<Map<Int, List<Pair<Double, Double>>>>): Double {
+        var speed = -1.0
+        var startNote = Pair(Double.MAX_VALUE, Double.MAX_VALUE)
+        var endNote = Pair(Double.MAX_VALUE, Double.MAX_VALUE)
+        var searchKey = -1
+        var startFrame = -1
+        for (f in notes.indices) {
+            val noteFrame = notes[f]
+            // find frame with at least one note
+            if (noteFrame.isNotEmpty()) {
+                // find lowest up note (easiest to find in the next frame)
+                for ((key, notes) in noteFrame) {
+                    notes.forEach { point ->
+                        if (point.second < startNote.second) {
+                            startNote = point
+                            searchKey = key
+                        }
+                    }
+                }
+            }
+            if (searchKey != -1) {
+                startFrame = f
+                break
+            }
+        }
+
+        // check if we found a valid startFrame
+        if (startFrame in 0 until (notes.size - 1)) { // exclude one frame as we need one after the startFrame
+            val noteFrame = notes[startFrame + 1]
+            if (noteFrame.containsKey(searchKey)) {
+                val keyNotes = noteFrame[searchKey]
+                keyNotes?.forEach { point ->
+                    if (point.second < endNote.second) {
+                        endNote = point
+                    }
+                }
+            }
+        }
+
+        if (startNote.second != Double.MAX_VALUE && endNote.second != Double.MAX_VALUE) {
+            speed = endNote.second - startNote.second
+        }
+
+        return speed
     }
 
     private fun detectNotesInImage(
@@ -228,7 +267,8 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             slices.clear()
             val sliceWidth = (border.second - border.first)
             val widthThreshold = sliceWidth * 0.55
-            val borderStart = (border.first - sliceWidth * 0.2).roundToInt().coerceIn(0, img.width())
+            val borderStart =
+                (border.first - sliceWidth * 0.2).roundToInt().coerceIn(0, img.width())
             val borderEnd = (border.second + sliceWidth * 0.2).roundToInt().coerceIn(0, img.width())
             slices.add(0, channels[0].submat(0, img.height(), borderStart, borderEnd))
             slices.add(1, channels[1].submat(0, img.height(), borderStart, borderEnd))
@@ -261,109 +301,6 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         return Triple(top, bottom, right - left)
     }
 
-    private fun sliceAndConquer(img: Mat, out: Mat) {
-        val keys = mutableListOf<Pair<Double, Double>>()
-        val (whiteNotes, keyboardWidth) = initKeys('a', -3, 'c', 5, keys)
-        val channels: MutableList<Mat> = mutableListOf()
-        val contours = mutableListOf<MatOfPoint>()
-        val hierarchy = Mat()
-        val points = mutableMapOf<Int, MutableList<Pair<Point, Point>>>()
-        val pixelsPerInch = img.width() / keyboardWidth
-
-        val keyBorders = keys.asSequence().map { old ->
-            Pair(
-                old.first * pixelsPerInch,
-                ((old.second * pixelsPerInch).coerceAtMost(img.width().toDouble()))
-            )
-        }
-        val white = Scalar(255.0, 255.0, 255.0)
-        line(img, Point(0.0, 0.0), Point(img.width().toDouble(), 0.0), white, 1)
-        //println("keys: ${keyBorders.joinToString(", ")} ")
-        //println("relative: ${keys.joinToString(separator = ", ")}}")
-
-        var sliceIndex = 0
-        for (border in keyBorders) {
-            contours.clear()
-            channels.clear()
-            val width = (border.second - border.first)
-            val widthThreshold = width * 0.55
-            val slice = img.submat(
-                0, img.height(),
-                (border.first - width * 0.2).roundToInt().coerceIn(0, img.width()),
-                (border.second + width * 0.2).roundToInt().coerceIn(0, img.width())
-            )
-
-            split(slice, channels)
-            val weights = doubleArrayOf(80.0, 85.0, 80.0)
-            val addedThresh = computeAddedThresh(channels, weights)
-            findContours(addedThresh, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE)
-            /*saveImage("./slices/slice_$sliceIndex.jpg", slice)
-            saveImage("./slices/slice_${sliceIndex}a.jpg", addedThresh)
-            saveImage("./slices/slice_${sliceIndex}a0.jpg", channels[0])
-            saveImage("./slices/slice_${sliceIndex}a1.jpg", channels[1])
-            saveImage("./slices/slice_${sliceIndex}a2.jpg", channels[2])*/
-
-            for (x in 0 until hierarchy.width()) {
-                for (y in 0 until hierarchy.height()) {
-                    // entry = (next, previous, firstChild, parent)
-                    val entry = hierarchy.get(y, x)
-                    val parent = entry[3]
-                    if (parent.toInt() != -1) {
-                        val foundPoints = findMinMaxPoint(contours[x])
-                        foundPoints.first.x += border.first - width * 0.2
-                        foundPoints.second.x += border.first - width * 0.2
-                        if (foundPoints.first.x - foundPoints.second.x >= widthThreshold) {
-                            points.getOrPut(x) { mutableListOf() }.add(foundPoints)
-                        }
-                    }
-                }
-            }
-            sliceIndex++
-        }
-
-        for (key in points.keys) {
-            val item = points.getOrDefault(key, mutableListOf())
-            for (y in 0 until item.size) {
-                val notesInLine = item[y]
-                //println("width of note: ${notesInLine.first.x - notesInLine.second.x}")
-                rectangle(img, notesInLine.first, notesInLine.second, Scalar(0.0, 0.0, 255.0), 3)
-            }
-        }
-
-        //saveImage("./notes.jpg", img)
-        img.copyTo(out)
-    }
-
-    private fun findMinMaxPoint(elem: MatOfPoint): Pair<Point, Point> {
-        val maxXY = elem.toArray().reduce { point1, point2 ->
-            point1.x = max(point1.x, point2.x)
-            point1.y = max(point1.y, point2.y)
-            point1
-        }
-        val minXY = elem.toArray().reduce { point1, point2 ->
-            point1.x = min(point1.x, point2.x)
-            point1.y = min(point1.y, point2.y)
-            point1
-        }
-        return Pair(maxXY, minXY)
-    }
-
-    private fun test3(img: Mat, out: Mat) {
-        val channels: MutableList<Mat> = mutableListOf()
-        split(img, channels)
-
-        val weights = doubleArrayOf(110.0, 160.0, 160.0)
-        val addedThresh = computeAddedThresh(channels, weights)
-
-        saveImage("./addedThres.jpg", addedThresh)
-
-        val contours = mutableListOf<MatOfPoint>()
-        val hierarchy = Mat()
-        findContours(addedThresh, contours, hierarchy, RETR_LIST, CHAIN_APPROX_NONE)
-        drawContours(img, contours, -1, Scalar(0.0, 0.0, 0255.0), 2)
-        img.copyTo(out)
-    }
-
     private fun computeAddedThresh(channels: MutableList<Mat>, weights: DoubleArray): Mat {
         if (weights.size < 3) {
             throw IllegalArgumentException("size of weights must be exactly 3")
@@ -385,92 +322,6 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         bitwise_and(threshBlue, threshGreen, addedThresh)
         bitwise_and(addedThresh, threshRed, addedThresh)
         return addedThresh
-    }
-
-    private fun test2(img: Mat, out: Mat) {
-        val hsv = Mat()
-        val thresh = Mat()
-        cvtColor(img, hsv, COLOR_BGR2HSV)
-        val channels: MutableList<Mat> = mutableListOf()
-        split(hsv, channels)
-
-        val blur = Mat()
-        GaussianBlur(channels[2], blur, Size(7.0, 7.0), 0.0, 0.0)
-        val cannyBlur = Mat()
-        Canny(blur, cannyBlur, 230.0, 230.0)
-        saveImage("./cannyBlur.jpg", cannyBlur)
-
-        val hueBlur = Mat()
-        GaussianBlur(channels[2], hueBlur, Size(7.0, 7.0), 0.0, 0.0)
-        threshold(hueBlur, thresh, 128.0, 255.0, THRESH_BINARY)
-        saveImage("./thresh.jpg", thresh)
-        saveImage("./channel.jpg", channels[2])
-
-
-        val contours = mutableListOf<MatOfPoint>()
-        val hierarchy = Mat()
-        findContours(thresh, contours, hierarchy, RETR_EXTERNAL, CHAIN_APPROX_NONE)
-        drawContours(img, contours, -1, Scalar(0.0, 0.0, 255.0), Core.FILLED)
-        img.copyTo(out)
-    }
-
-    private fun test(img: Mat, out: Mat) {
-        val hsv = Mat()
-        val thresh = Mat()
-        cvtColor(img, hsv, COLOR_BGR2HSV)
-        val channels: MutableList<Mat> = mutableListOf()
-        split(hsv, channels)
-        threshold(channels[2], thresh, 128.0, 255.0, THRESH_BINARY)
-
-        /*val gray: Mat = Mat()
-        val thresh: Mat = Mat()
-        cvtColor(img, gray, COLOR_BGR2GRAY)
-        threshold(gray, thresh, 170.0, 255.0, THRESH_BINARY)*/
-        val contours = mutableListOf<MatOfPoint>()
-        val hierarchy = Mat()
-        findContours(thresh, contours, hierarchy, RETR_EXTERNAL, CHAIN_APPROX_NONE)
-        println(hierarchy)
-        drawContours(img, contours, -1, Scalar(0.0, 0.0, 255.0), 2)
-        img.copyTo(out)
-    }
-
-    private fun hsv(img: Mat, out: Mat) {
-        val hsv: Mat = Mat()
-        val thres: Mat = Mat()
-        Imgproc.cvtColor(img, hsv, Imgproc.COLOR_BGR2HSV)
-        val channels: MutableList<Mat> = mutableListOf()
-        split(hsv, channels)
-
-        println("channels ${channels.size}")
-        threshold(channels[2], thres, 128.0, 255.0, Imgproc.THRESH_BINARY)
-        val labelImage: Mat = Mat(img.size(), CV_32S);
-        val nLabels = connectedComponents(thres, labelImage, 8)
-        val colors = mutableListOf<Color>()
-        println("labels: $nLabels")
-        for (label in 0 until nLabels) {
-            colors.add(Color(Random.nextInt(256), Random.nextInt(256), Random.nextInt(256)))
-        }
-
-        val dst: Mat = Mat(img.size(), CV_8UC3);
-        for (r in 0 until dst.rows()) {
-            for (c in 0 until dst.cols()) {
-                val label: Int = labelImage.get(r, c).first().toInt()
-                dst.put(
-                    r,
-                    c,
-                    colors[label].red.toDouble(),
-                    colors[label].green.toDouble(),
-                    colors[label].blue.toDouble()
-                )
-            }
-        }
-
-        dst.copyTo(out)
-//        std::vector<Vec3b> colors(nLabels);
-//        colors[0] = Vec3b(0, 0, 0);//background
-//        for(int label = 1; label < nLabels; ++label){
-//            colors[label] = Vec3b( (rand()&255), (rand()&255), (rand()&255) );
-//        }
     }
 
     private fun loadImage(imagePath: String): Mat? {
