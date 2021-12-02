@@ -8,6 +8,7 @@ import org.opencv.core.Scalar
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc.*
 import org.opencv.videoio.VideoCapture
+import java.io.FileOutputStream
 import kotlin.math.roundToInt
 import kotlin.system.measureTimeMillis
 
@@ -129,6 +130,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             val frame = Mat()
             val cut = Mat()
             var keyCount = 0
+            var frameHeight = 0
 
             cap.read(frame)
             var counter = 0
@@ -146,8 +148,10 @@ class Main(private val filepathInput: String, private val filepathOutput: String
 
                 while (!frame.empty()) {
                     counter++
-                    println("processing frame #$counter")
+                    if (counter % 10 == 0)
+                        println("processing frame #$counter")
                     reshape(frame, cut, 0.75)
+                    frameHeight = frame.height()
                     val imageNotes = detectNotesInImage(cut, keyBorders)
                     notes.add(imageNotes)
                     cap.read(frame)
@@ -155,21 +159,103 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             }
             cap.release()
 
-            convertNotesToTimestamps(notes, keyCount)
+            if (frameHeight <= 0) {
+                println("Failed at processing the images")
+            } else {
+                val timeline = convertNotesToTimestamps(notes, keyCount, frameHeight.toDouble())
+
+                // write timeline in a file
+                FileOutputStream("./output/timeline.txt").use { writer ->
+                    timeline.forEach { key ->
+                        var line = ""
+                        key.forEach { note ->
+                            line += "[${note.first} - ${note.second}] "
+                        }
+                        writer.write((line + "\n").toByteArray())
+                    }
+                }
+            }
         }
         println("time needed: $millis ms")
     }
 
     private fun convertNotesToTimestamps(
         notes: List<Map<Int, List<Pair<Double, Double>>>>,
-        keyCount: Int
-    ) {
+        keyCount: Int,
+        height: Double
+    ): List<List<Pair<Double, Double>>> {
+        val speed = estimateSpeed(notes) // TODO: not perfect but probably good enough for now
         val keyFocused = convertIntoKeyFocused(notes, keyCount)
-        val speed = estimateSpeed(notes)
-        if (speed <= 0) {
-            throw RuntimeException("Could not get a valid speed from notes, speed: $speed")
+        val timeline = mutableListOf<List<Pair<Double, Double>>>()
+        var counter = 0
+        for (key in keyFocused) {
+            val keyTimeline = getKeyTimeline(key, speed, height)
+            println("for key $counter, timeline: ${keyTimeline.joinToString(separator = ", ")}")
+            timeline.add(keyTimeline)
+            counter++
         }
-        println("speed $speed")
+        return timeline
+    }
+
+
+    /**
+     * Returns a list containing a Pair<Start, End> for each note. The unit of Start and End are
+     * pixels.
+     */
+    private fun getKeyTimeline(
+        key: List<List<Pair<Double, Double>>>,
+        speed: Double,
+        height: Double
+    ): List<Pair<Double, Double>> {
+        val timeline = mutableListOf<Pair<Double, Double>>()
+        var currentTime = 0.0
+        // add a timestamp for every note and frame, they are probably overlapping quite a lot
+        for (frame in key) {
+            frame.forEach { note ->
+                val start = currentTime + (height - note.second) * speed
+                val end = currentTime + (height - note.first) * speed
+                timeline.add(Pair(start, end))
+            }
+
+            currentTime += speed
+        }
+
+        if (timeline.isEmpty()) {
+            return listOf()
+        }
+
+        // sort notes to make finding overlapping ones easier
+        timeline.sortBy { note -> note.first }
+        // combine overlapping notes
+        val cleanTimeline = mutableListOf(timeline.first())
+        var previousEnd: Double = timeline.firstOrNull()?.second ?: 0.0
+        for (note in timeline) {
+            if (previousEnd > note.first) {
+                // this note is the same as the previous, thus we might have to extend the previous
+                if (note.second > previousEnd) {
+                    // extend the previous one
+                    val last = cleanTimeline.removeLast()
+                    cleanTimeline.add(Pair(last.first, note.second))
+                    previousEnd = note.second
+                }
+            } else {
+                // this is a new note
+                cleanTimeline.add(note)
+                previousEnd = note.second
+            }
+        }
+
+        return cleanTimeline
+    }
+
+
+    private fun estimateKeySpeed(key: List<List<Pair<Double, Double>>>, guess: Double): Double {
+        val currentNotes = mutableListOf<Pair<Double, Double>>()
+        var estimatedSpeed = guess
+        for (frame in key) {
+            // TODO: misses implementation
+        }
+        return estimatedSpeed
     }
 
     private fun convertIntoKeyFocused(
