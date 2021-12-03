@@ -109,4 +109,74 @@ class MainTest {
         // assert
         assertEquals(want, have)
     }
+
+    @Test
+    fun calculateCrossCorrelationTestEqual() {
+        // arrange
+        val frameOld = listOf(
+            Pair(12.0, 0.0),
+            Pair(35.0, 30.0),
+        )
+        val frameNew = listOf(
+            Pair(12.0, 0.0),
+            Pair(35.0, 30.0),
+        )
+        val want = 1.0
+        // act
+        val have = calculateCrossCorrelation(frameOld, frameNew, 0)
+        // assert
+        assertEquals(want, have)
+    }
+
+    @Test
+    fun calculateCrossCorrelationTestOff2() {
+        // arrange
+        val frameOld = listOf(
+            Pair(12.0, 0.0),
+            Pair(35.0, 30.0),
+        )
+        val frameNew = listOf(
+            Pair(14.0, 2.0),
+            Pair(37.0, 32.0),
+        )
+        val want = 1.0
+        // act
+        val have = calculateCrossCorrelation(frameOld, frameNew, 2)
+        // assert
+        assertEquals(want, have)
+    }
+
+    @Test
+    fun calculateCrossCorrelationTestHalf() {
+        // arrange
+        val frameOld = listOf(
+            Pair(12.0, 6.0),
+        )
+        val frameNew = listOf(
+            Pair(12.0, 0.0),
+        )
+        val want = 0.5
+        // act
+        val have = calculateCrossCorrelation(frameOld, frameNew, 0)
+        // assert
+        assertEquals(want, have)
+    }
+
+    @Test
+    fun getCrossOffsetTest() {
+        // arrange
+        val frameOld = listOf(
+            Pair(12.0, 0.0),
+            Pair(35.0, 30.0),
+        )
+        val frameNew = listOf(
+            Pair(25.0, 13.0),
+            Pair(48.0, 43.0),
+        )
+        val want = 13.0
+        // act
+        val have = getCrossOffset(frameOld, frameNew)
+        // assert
+        assertEquals(want, have)
+    }
 }

@@ -3,12 +3,9 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import nu.pattern.OpenCV
+import org.opencv.core.*
 import org.opencv.core.Core.bitwise_and
 import org.opencv.core.Core.split
-import org.opencv.core.Mat
-import org.opencv.core.MatOfPoint
-import org.opencv.core.Point
-import org.opencv.core.Scalar
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc.*
 import org.opencv.videoio.VideoCapture
@@ -42,12 +39,6 @@ class Main(private val filepathInput: String, private val filepathOutput: String
     fun start() {
         //detectNotesInVideo()
         createMidiFromTimeline()
-    }
-
-    private fun reshape(img: Mat, out: Mat, heightPercentage: Double) {
-        val height = img.rows()
-        val width = img.cols()
-        img.submat(0, (height * heightPercentage).toInt(), 0, width).copyTo(out)
     }
 
     private fun initKeys(
@@ -163,45 +154,53 @@ class Main(private val filepathInput: String, private val filepathOutput: String
 
     private fun detectNotesInVideo() {
         val millis = measureTimeMillis {
+            val frameWidth = 1920
+            val frameHeight = (1080 * 0.75).toInt()
             val cap = VideoCapture(filepathInput)
-            val notes = mutableListOf<Map<Int, List<Pair<Double, Double>>>>()
+            val keys = mutableListOf<Pair<Double, Double>>()
+            val (_, keyboardWidth) = initKeys('a', -3, 'c', 5, keys)
+            val pixelsPerInch = frameWidth / keyboardWidth
+            val keyBorders = keys.asSequence().map { old ->
+                Pair(
+                    old.first * pixelsPerInch,
+                    ((old.second * pixelsPerInch).coerceAtMost(frameWidth.toDouble()))
+                )
+            }.toList()
+            val notes = mutableListOf<MutableList<MutableList<Pair<Double, Double>>>>()
+            keyBorders.indices.forEach { _ -> notes.add(mutableListOf()) }
+
             val frame = Mat()
-            val cut = Mat()
-            var keyCount = 0
-            var frameHeight = 0
+            var cut = Mat()
 
             cap.read(frame)
             var counter = 0
-            if (!frame.empty()) {
-                val keys = mutableListOf<Pair<Double, Double>>()
-                val (_, keyboardWidth) = initKeys('a', -3, 'c', 5, keys)
-                keyCount = keys.size
-                val pixelsPerInch = frame.width() / keyboardWidth
-                val keyBorders = keys.asSequence().map { old ->
-                    Pair(
-                        old.first * pixelsPerInch,
-                        ((old.second * pixelsPerInch).coerceAtMost(frame.width().toDouble()))
-                    )
-                }
+            while (!frame.empty()) {
+                //if (counter % 10 == 0)
+                println("processing frame #$counter")
+                // Add a frame entry for each key
+                notes.forEach { keyList -> keyList.add(mutableListOf()) }
+                cut = Mat(frame, Rect(0, 0, frameWidth, frameHeight))
 
-                while (!frame.empty()) {
-                    counter++
-                    if (counter % 10 == 0)
-                        println("processing frame #$counter")
-                    reshape(frame, cut, 0.75)
-                    frameHeight = frame.height()
-                    val imageNotes = detectNotesInImage(cut, keyBorders, counter)
-                    notes.add(imageNotes)
-                    cap.read(frame)
-                }
+                detectNotesInImage(cut, keyBorders, notes, counter)
+
+                cap.read(frame)
+                counter++
             }
+
             cap.release()
 
+
+            // Save data
             if (frameHeight <= 0) {
                 println("Failed at processing the images")
             } else {
-                val timeline = convertNotesToTimestamps(notes, keyCount, frameHeight.toDouble())
+                val noteObject = NoteMarkers(notes)
+                val noteString = Json.encodeToString(noteObject)
+                FileOutputStream("./output/noteMarkers.json").use {
+                    it.write(noteString.toByteArray())
+                }
 
+                val timeline = convertNotesToTimestamps(notes, frameHeight.toDouble())
                 val timelineString = Json.encodeToString(timeline)
                 FileOutputStream("./output/timeline.json").use {
                     it.write(timelineString.toByteArray())
@@ -300,23 +299,48 @@ class Main(private val filepathInput: String, private val filepathOutput: String
 
 
     private fun estimateKeySpeed(key: List<List<Pair<Double, Double>>>, guess: Double): Double {
-        val currentNotes = mutableListOf<Pair<Double, Double>>()
-        var estimatedSpeed = guess
-        for (frame in key) {
-            // TODO: misses implementation
+        if (key.size < 2) {
+            return -1.0
+        }
+        var estimatedSpeed = 0.0
+        val differences = mutableListOf<Double>()
+        var lastFrame = key[0].sortedBy { -it.second }
+        for (fIndex in 1 until key.size) {
+            val frame = key[fIndex]
+            val sortedNotes = frame.sortedBy { -it.second } // from biggest to smallest
+
+            // compare the two images
+            var oldI = 0
+            var newI = 0
+            while (oldI < lastFrame.size && newI < frame.size) {
+                val oldNote = lastFrame[oldI]
+                val newNote = frame[newI]
+                // top one is smaller / higher number means lower
+
+                if (newNote.second <= oldNote.second) {
+                    // different Note -> skip it
+                    ++newI
+                } else {
+                    differences.add(newNote.second - oldNote.second)
+                    ++newI
+                    ++oldI
+                }
+            }
+
+            lastFrame = sortedNotes
         }
         return estimatedSpeed
     }
 
     private fun detectNotesInImage(
         img: Mat,
-        keyBorders: Sequence<Pair<Double, Double>>,
-        index: Int
-    ): Map<Int, List<Pair<Double, Double>>> {
+        keyBorders: List<Pair<Double, Double>>,
+        notes: MutableList<MutableList<MutableList<Pair<Double, Double>>>>,
+        frameIndex: Int
+    ) {
         val channels: MutableList<Mat> = mutableListOf()
         val contours = mutableListOf<MatOfPoint>()
         val hierarchy = Mat()
-        val notes = mutableMapOf<Int, MutableList<Pair<Double, Double>>>()
 
         val white = Scalar(255.0, 255.0, 255.0)
         line(img, Point(0.0, 0.0), Point(img.width().toDouble(), 0.0), white, 1)
@@ -324,7 +348,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
 
         val slices = mutableListOf<Mat>()
         val thresholds = doubleArrayOf(80.0, 85.0, 80.0)
-        keyBorders.forEachIndexed { sliceIndex, border ->
+        keyBorders.forEachIndexed { keyIndex, border ->
             contours.clear()
             slices.clear()
             val sliceWidth = (border.second - border.first)
@@ -346,16 +370,15 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                     if (parent.toInt() != -1) {
                         val (top, bottom, width) = findTopBottomAndWidth(contours[x])
                         if (width >= widthThreshold) {
-                            //println("key $sliceIndex from $bottom to $top")
-                            //rectangle(img, Point(border.first, top), Point(border.second, bottom), Scalar(0.0, 0.0, 255.0), 2)
-                            notes.getOrPut(sliceIndex) { mutableListOf() }.add(Pair(top, bottom))
+                            //rectangle(img, Point(border.first, top-1), Point(border.second, bottom+1), Scalar(0.0, 0.0, 255.0), 2)
+                            // We only look at inner contours, so it is safe to extend them by one
+                            notes[keyIndex][frameIndex].add(Pair(top - 1, bottom + 1))
                         }
                     }
                 }
             }
         }
-        //saveImage("./slices/frame_$index.jpg", img)
-        return notes
+        //saveImage("./slices/frame_$frameIndex.jpg", img)
     }
 
     private fun findTopBottomAndWidth(elem: MatOfPoint): Triple<Double, Double, Double> {
@@ -503,15 +526,13 @@ private fun estimateSpeed(notes: List<Map<Int, List<Pair<Double, Double>>>>): Do
 
 fun convertNotesToTimestamps(
     // list of frame maps of keyIndex -> List of notes(top, bottom)
-    notes: List<Map<Int, List<Pair<Double, Double>>>>,
-    keyCount: Int,
+    notes: List<List<List<Pair<Double, Double>>>>,
     height: Double
 ): Timeline {
     //val speed = estimateSpeed(notes) // TODO: not perfect but probably good enough for now
-    val speed = 12.3 / 2.0
-    val keyFocused = convertIntoKeyFocused(notes, keyCount)
+    val speed = 12.3
     val timeline = mutableListOf<List<Pair<Double, Double>>>()
-    return getTimeline(keyFocused, speed, height, timeline)
+    return getTimeline(notes, speed, height, timeline)
 }
 
 fun getTimeline(
@@ -556,6 +577,57 @@ fun convertIntoKeyFocused(
     return keyFocused
 }
 
+fun getCrossOffset(frame1: List<Pair<Double, Double>>, frame2: List<Pair<Double, Double>>): Double {
+    val end = frame1.maxOf { it.first }.roundToInt()
+    var biggestCorrelation = 0.0
+    var bestOffset = 0
+    for (offset in 1 until end) {
+        val correlation = calculateCrossCorrelation(frame1, frame2, offset)
+        if (correlation > biggestCorrelation) {
+            biggestCorrelation = correlation
+            bestOffset = offset
+        }
+    }
+    return bestOffset.toDouble()
+}
+
+fun calculateCrossCorrelation(
+    frame1: List<Pair<Double, Double>>,
+    frame2: List<Pair<Double, Double>>,
+    offset: Int
+): Double {
+    val points = mutableListOf<Pair<Double, Boolean>>()
+    frame1.forEach { note ->
+        points.add(Pair(note.first + offset, true))
+        points.add(Pair(note.second + offset, true))
+    }
+    frame2.forEach { note ->
+        points.add(Pair(note.first, false))
+        points.add(Pair(note.second, false))
+    }
+
+    var equalDistance = 0.0
+    points.sortBy { it.first }
+    var frame1Open = false
+    var frame2Open = false
+    var lastPoint = 0.0
+    points.forEach { point ->
+        if (frame1Open == frame2Open) { // both open or both closef
+            equalDistance += point.first - lastPoint
+        }
+        if (point.second) { // frame1
+            frame1Open = !frame1Open
+        } else {
+            frame2Open = !frame2Open
+        }
+
+        lastPoint = point.first
+    }
+    return equalDistance / (points.last().first) // gets a value between 0 and 1
+}
 
 @Serializable
 data class Timeline(val timeline: List<List<Pair<Double, Double>>>)
+
+@Serializable
+data class NoteMarkers(val notes: MutableList<MutableList<MutableList<Pair<Double, Double>>>>)
