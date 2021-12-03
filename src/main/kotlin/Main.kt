@@ -297,41 +297,6 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         exitProcess(1)
     }
 
-
-    private fun estimateKeySpeed(key: List<List<Pair<Double, Double>>>, guess: Double): Double {
-        if (key.size < 2) {
-            return -1.0
-        }
-        var estimatedSpeed = 0.0
-        val differences = mutableListOf<Double>()
-        var lastFrame = key[0].sortedBy { -it.second }
-        for (fIndex in 1 until key.size) {
-            val frame = key[fIndex]
-            val sortedNotes = frame.sortedBy { -it.second } // from biggest to smallest
-
-            // compare the two images
-            var oldI = 0
-            var newI = 0
-            while (oldI < lastFrame.size && newI < frame.size) {
-                val oldNote = lastFrame[oldI]
-                val newNote = frame[newI]
-                // top one is smaller / higher number means lower
-
-                if (newNote.second <= oldNote.second) {
-                    // different Note -> skip it
-                    ++newI
-                } else {
-                    differences.add(newNote.second - oldNote.second)
-                    ++newI
-                    ++oldI
-                }
-            }
-
-            lastFrame = sortedNotes
-        }
-        return estimatedSpeed
-    }
-
     private fun detectNotesInImage(
         img: Mat,
         keyBorders: List<Pair<Double, Double>>,
@@ -478,50 +443,38 @@ fun getKeyTimeline(
 /**
  * If speed is negative then it is invalid.
  */
-private fun estimateSpeed(notes: List<Map<Int, List<Pair<Double, Double>>>>): Double {
-    var speed = -1.0
-    var startNote = Pair(Double.MAX_VALUE, Double.MAX_VALUE)
-    var endNote = Pair(Double.MAX_VALUE, Double.MAX_VALUE)
-    var searchKey = -1
-    var startFrame = -1
-    for (f in notes.indices) {
-        val noteFrame = notes[f]
-        // find frame with at least one note
-        if (noteFrame.isNotEmpty()) {
-            // find lowest up note (easiest to find in the next frame)
-            for ((key, notes) in noteFrame) {
-                notes.forEach { point ->
-                    if (point.second < startNote.second) {
-                        startNote = point
-                        searchKey = key
-                    }
-                }
-            }
-        }
-        if (searchKey != -1) {
-            startFrame = f
-            break
-        }
+private fun estimateSpeed(notes: List<List<List<Pair<Double, Double>>>>): Double {
+    var speedSum = 0.0
+    var weights = 0
+    notes.forEach { key ->
+        val (offset, weight) = estimateKeySpeed(key)
+        speedSum += offset
+        weights += weight
     }
 
-    // check if we found a valid startFrame
-    if (startFrame in 0 until (notes.size - 1)) { // exclude one frame as we need one after the startFrame
-        val noteFrame = notes[startFrame + 1]
-        if (noteFrame.containsKey(searchKey)) {
-            val keyNotes = noteFrame[searchKey]
-            keyNotes?.forEach { point ->
-                if (point.second < endNote.second) {
-                    endNote = point
-                }
-            }
+    if (weights == 0) {
+        return -1.0
+    } else {
+        return speedSum / weights
+    }
+}
+
+private fun estimateKeySpeed(key: List<List<Pair<Double, Double>>>): Pair<Double, Int> {
+    if (key.size < 2) {
+        return 0.0 to 0
+    }
+    var offsetSum = 0.0
+    var lastFrame = listOf<Pair<Double, Double>>()
+    var divisor = 0 // the amount of times we actually calculated the cross offset
+    for (frame in key) {
+        if (frame.isNotEmpty() && lastFrame.isNotEmpty()) {
+            offsetSum += getCrossOffset(lastFrame, frame)
+            ++divisor
         }
+        lastFrame = frame
     }
 
-    if (startNote.second != Double.MAX_VALUE && endNote.second != Double.MAX_VALUE) {
-        speed = endNote.second - startNote.second
-    }
-
-    return speed
+    return offsetSum to divisor
 }
 
 fun convertNotesToTimestamps(
