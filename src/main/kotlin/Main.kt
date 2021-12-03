@@ -542,4 +542,20 @@ fun convertIntoKeyFocused(
         for (f in 0 until frameCount) {
             keyList.add(mutableListOf())
         }
-        
+        keyFocused.add(keyList)
+    }
+
+    notes.forEachIndexed { fIndex, frame ->
+        frame.forEach { (kIndex, key) ->
+            key.sortedBy { note -> note.second }.forEach { note ->
+                keyFocused[kIndex][fIndex].add(note)
+            }
+        }
+    }
+
+    return keyFocused
+}
+
+
+@Serializable
+data class Timeline(val timeline: List<List<Pair<Double, Double>>>)
