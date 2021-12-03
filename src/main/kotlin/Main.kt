@@ -1,3 +1,7 @@
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import nu.pattern.OpenCV
 import org.opencv.core.Core.bitwise_and
 import org.opencv.core.Core.split
@@ -8,8 +12,15 @@ import org.opencv.core.Scalar
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc.*
 import org.opencv.videoio.VideoCapture
+import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import javax.sound.midi.MidiSystem
+import javax.sound.midi.ShortMessage.NOTE_OFF
+import javax.sound.midi.ShortMessage.NOTE_ON
+import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.system.exitProcess
 import kotlin.system.measureTimeMillis
 
 // -XX:ParallelGCThreads=1
@@ -29,7 +40,8 @@ class Main(private val filepathInput: String, private val filepathOutput: String
     }
 
     fun start() {
-        detectNotesInVideo()
+        //detectNotesInVideo()
+        createMidiFromTimeline()
     }
 
     private fun reshape(img: Mat, out: Mat, heightPercentage: Double) {
@@ -123,6 +135,32 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             throw java.lang.IllegalArgumentException("keyHigh must be one of [a, h, c, d, e, f, g]")
     }
 
+    private fun createMidiFromTimeline() {
+        val timelineString: String
+        FileInputStream("./output/timeline.json").use {
+            timelineString = it.readAllBytes().decodeToString()
+        }
+        val timeline = Json.decodeFromString<Timeline>(timelineString)
+        val singleTimeline = convertInSingleTimeline(timeline)
+        val shiftedTimeline = shiftTimelineToStart(singleTimeline)
+        createAndPlayMidi(shiftedTimeline)
+    }
+
+    private fun shiftTimelineToStart(timeline: List<Triple<Double, Int, Boolean>>): List<Triple<Double, Int, Boolean>> {
+        if (timeline.isEmpty()) {
+            return timeline
+        }
+        val zeroLine = mutableListOf<Triple<Double, Int, Boolean>>()
+        var smallest = Double.MIN_VALUE
+        val offset = timeline.minOf { it.first }
+        timeline.forEach { note ->
+            smallest = min(smallest, note.first - offset)
+            zeroLine.add(Triple(note.first - offset, note.second, note.third))
+        }
+        println("offset: $offset smallest: $smallest")
+        return zeroLine
+    }
+
     private fun detectNotesInVideo() {
         val millis = measureTimeMillis {
             val cap = VideoCapture(filepathInput)
@@ -152,7 +190,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                         println("processing frame #$counter")
                     reshape(frame, cut, 0.75)
                     frameHeight = frame.height()
-                    val imageNotes = detectNotesInImage(cut, keyBorders)
+                    val imageNotes = detectNotesInImage(cut, keyBorders, counter)
                     notes.add(imageNotes)
                     cap.read(frame)
                 }
@@ -164,88 +202,100 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             } else {
                 val timeline = convertNotesToTimestamps(notes, keyCount, frameHeight.toDouble())
 
-                // write timeline in a file
-                FileOutputStream("./output/timeline.txt").use { writer ->
-                    timeline.forEach { key ->
-                        var line = ""
-                        key.forEach { note ->
-                            line += "[${note.first} - ${note.second}] "
-                        }
-                        writer.write((line + "\n").toByteArray())
-                    }
+                val timelineString = Json.encodeToString(timeline)
+                FileOutputStream("./output/timeline.json").use {
+                    it.write(timelineString.toByteArray())
                 }
             }
         }
         println("time needed: $millis ms")
     }
 
-    private fun convertNotesToTimestamps(
-        notes: List<Map<Int, List<Pair<Double, Double>>>>,
-        keyCount: Int,
-        height: Double
-    ): List<List<Pair<Double, Double>>> {
-        val speed = estimateSpeed(notes) // TODO: not perfect but probably good enough for now
-        val keyFocused = convertIntoKeyFocused(notes, keyCount)
-        val timeline = mutableListOf<List<Pair<Double, Double>>>()
-        var counter = 0
-        for (key in keyFocused) {
-            val keyTimeline = getKeyTimeline(key, speed, height)
-            println("for key $counter, timeline: ${keyTimeline.joinToString(separator = ", ")}")
-            timeline.add(keyTimeline)
-            counter++
+    private fun convertInSingleTimeline(timeline: Timeline): List<Triple<Double, Int, Boolean>> {
+        // Triple = (time, key, onOrOff)
+        val singleTimeline = mutableListOf<Triple<Double, Int, Boolean>>()
+        timeline.timeline.forEachIndexed { keyIndex, events ->
+            events.forEach { event ->
+                // adjust time
+                singleTimeline.add(
+                    Triple(
+                        event.first,
+                        keyIndex,
+                        true
+                    )
+                )
+                singleTimeline.add(
+                    Triple(
+                        event.second,
+                        keyIndex,
+                        false
+                    )
+                )
+            }
         }
-        return timeline
+        // might need to sort it
+        return singleTimeline
     }
 
+    private fun createAndPlayMidi(timeline: List<Triple<Double, Int, Boolean>>) {
+        println("create midi")
+        val sequencer = MidiSystem.getSequencer()
+        sequencer.open()
+        // Creating a sequence.
+        val sequence = javax.sound.midi.Sequence(javax.sound.midi.Sequence.PPQ, 4)
+        // PPQ(Pulse per ticks) is used to specify timing, type and 4 is the timing resolution.
+        // Creating a track on our sequence upon which MIDI events would be placed
+        val track = sequence.createTrack()
 
-    /**
-     * Returns a list containing a Pair<Start, End> for each note. The unit of Start and End are
-     * pixels.
-     */
-    private fun getKeyTimeline(
-        key: List<List<Pair<Double, Double>>>,
-        speed: Double,
-        height: Double
-    ): List<Pair<Double, Double>> {
-        val timeline = mutableListOf<Pair<Double, Double>>()
-        var currentTime = 0.0
-        // add a timestamp for every note and frame, they are probably overlapping quite a lot
-        for (frame in key) {
-            frame.forEach { note ->
-                val start = currentTime + (height - note.second) * speed
-                val end = currentTime + (height - note.first) * speed
-                timeline.add(Pair(start, end))
-            }
-
-            currentTime += speed
-        }
-
-        if (timeline.isEmpty()) {
-            return listOf()
-        }
-
-        // sort notes to make finding overlapping ones easier
-        timeline.sortBy { note -> note.first }
-        // combine overlapping notes
-        val cleanTimeline = mutableListOf(timeline.first())
-        var previousEnd: Double = timeline.firstOrNull()?.second ?: 0.0
-        for (note in timeline) {
-            if (previousEnd > note.first) {
-                // this note is the same as the previous, thus we might have to extend the previous
-                if (note.second > previousEnd) {
-                    // extend the previous one
-                    val last = cleanTimeline.removeLast()
-                    cleanTimeline.add(Pair(last.first, note.second))
-                    previousEnd = note.second
-                }
+        val baseNote = 21 // the code of the lowest note on the piano, the A2
+        // Add events
+        timeline.forEach { event ->
+            if (event.third) {
+                // on
+                track.add(
+                    makeEvent(
+                        NOTE_ON,
+                        1,
+                        event.second + baseNote,
+                        100,
+                        event.first.div(52).toInt()
+                    )
+                )
             } else {
-                // this is a new note
-                cleanTimeline.add(note)
-                previousEnd = note.second
+                // off
+                track.add(
+                    makeEvent(
+                        NOTE_OFF,
+                        1,
+                        event.second + baseNote,
+                        100,
+                        event.first.div(52).toInt()
+                    )
+                )
             }
         }
 
-        return cleanTimeline
+        // Setting our sequence so that the sequencer can run it on synthesizer
+        sequencer.sequence = sequence
+
+        // Specifies the beat rate in beats per minute.
+        sequencer.tempoInBPM = 104.toFloat()
+
+        println("storing midi file")
+        val file = File("./output/midi.mid")
+        MidiSystem.write(sequence, 0, file)
+        println("start playing")
+        // Sequencer starts to play notes
+        /*sequencer.start()
+        while (true) {
+
+            // Exit the program when sequencer has stopped playing.
+            if (!sequencer.isRunning) {
+                sequencer.close()
+                exitProcess(1)
+            }
+        }*/
+        exitProcess(1)
     }
 
 
@@ -258,84 +308,10 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         return estimatedSpeed
     }
 
-    private fun convertIntoKeyFocused(
-        notes: List<Map<Int, List<Pair<Double, Double>>>>,
-        keyCount: Int
-    ): List<List<List<Pair<Double, Double>>>> {
-        // Structure: Key: frame: notes: note
-        val frameCount = notes.size
-        val keyFocused = mutableListOf<MutableList<MutableList<Pair<Double, Double>>>>()
-        for (k in 0 until keyCount) {
-            val keyList = mutableListOf<MutableList<Pair<Double, Double>>>()
-            for (f in 0 until frameCount) {
-                keyList.add(mutableListOf())
-            }
-            keyFocused.add(keyList)
-        }
-
-        notes.forEachIndexed { fIndex, frame ->
-            frame.forEach { (kIndex, key) ->
-                key.sortedBy { note -> note.second }.forEach { note ->
-                    keyFocused[kIndex][fIndex].add(note)
-                }
-            }
-        }
-
-        return keyFocused
-    }
-
-    /**
-     * If speed is negative then it is invalid.
-     */
-    private fun estimateSpeed(notes: List<Map<Int, List<Pair<Double, Double>>>>): Double {
-        var speed = -1.0
-        var startNote = Pair(Double.MAX_VALUE, Double.MAX_VALUE)
-        var endNote = Pair(Double.MAX_VALUE, Double.MAX_VALUE)
-        var searchKey = -1
-        var startFrame = -1
-        for (f in notes.indices) {
-            val noteFrame = notes[f]
-            // find frame with at least one note
-            if (noteFrame.isNotEmpty()) {
-                // find lowest up note (easiest to find in the next frame)
-                for ((key, notes) in noteFrame) {
-                    notes.forEach { point ->
-                        if (point.second < startNote.second) {
-                            startNote = point
-                            searchKey = key
-                        }
-                    }
-                }
-            }
-            if (searchKey != -1) {
-                startFrame = f
-                break
-            }
-        }
-
-        // check if we found a valid startFrame
-        if (startFrame in 0 until (notes.size - 1)) { // exclude one frame as we need one after the startFrame
-            val noteFrame = notes[startFrame + 1]
-            if (noteFrame.containsKey(searchKey)) {
-                val keyNotes = noteFrame[searchKey]
-                keyNotes?.forEach { point ->
-                    if (point.second < endNote.second) {
-                        endNote = point
-                    }
-                }
-            }
-        }
-
-        if (startNote.second != Double.MAX_VALUE && endNote.second != Double.MAX_VALUE) {
-            speed = endNote.second - startNote.second
-        }
-
-        return speed
-    }
-
     private fun detectNotesInImage(
         img: Mat,
-        keyBorders: Sequence<Pair<Double, Double>>
+        keyBorders: Sequence<Pair<Double, Double>>,
+        index: Int
     ): Map<Int, List<Pair<Double, Double>>> {
         val channels: MutableList<Mat> = mutableListOf()
         val contours = mutableListOf<MatOfPoint>()
@@ -370,12 +346,15 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                     if (parent.toInt() != -1) {
                         val (top, bottom, width) = findTopBottomAndWidth(contours[x])
                         if (width >= widthThreshold) {
+                            //println("key $sliceIndex from $bottom to $top")
+                            //rectangle(img, Point(border.first, top), Point(border.second, bottom), Scalar(0.0, 0.0, 255.0), 2)
                             notes.getOrPut(sliceIndex) { mutableListOf() }.add(Pair(top, bottom))
                         }
                     }
                 }
             }
         }
+        //saveImage("./slices/frame_$index.jpg", img)
         return notes
     }
 
@@ -418,3 +397,149 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         Imgcodecs.imwrite(path, image)
     }
 }
+
+/**
+ * Returns a list containing a Pair<Start, End> for each note. The unit of Start and End are
+ * pixels.
+ */
+fun getKeyTimeline(
+    key: List<List<Pair<Double, Double>>>,
+    speed: Double,
+    height: Double
+): List<Pair<Double, Double>> {
+    val timeline = mutableListOf<Pair<Double, Double>>()
+    var currentTime = 0.0
+    // add a timestamp for every note and frame, they are probably overlapping quite a lot
+    for (frame in key) {
+        frame.forEach { note ->
+            val start = currentTime + (height - note.second)
+            val end = currentTime + (height - note.first)
+            timeline.add(Pair(start, end))
+        }
+
+        currentTime += speed
+    }
+
+    if (timeline.isEmpty()) {
+        return listOf()
+    }
+
+    // in: (top, bottom) (0, 24)
+    // -> (top, bottom) (100, 76)
+    // sort notes to make finding overlapping ones easier
+    timeline.sortBy { note -> note.first }
+    // combine overlapping notes
+    val cleanTimeline = mutableListOf(timeline.first())
+    var previousEnd: Double =
+        timeline.firstOrNull()?.second ?: (height + 1) // bigger than anything possible
+    for (note in timeline) {
+        if (previousEnd >= note.first) {
+            // this note is the same as the previous, thus we might have to extend the previous
+            if (note.second < previousEnd) {
+                // extend the previous one
+                val last = cleanTimeline.removeLast()
+                cleanTimeline.add(Pair(last.first, note.second))
+                previousEnd = note.second
+            }
+        } else {
+            // this is a new note
+            cleanTimeline.add(note)
+            previousEnd = note.second
+        }
+    }
+
+    return cleanTimeline
+}
+
+
+/**
+ * If speed is negative then it is invalid.
+ */
+private fun estimateSpeed(notes: List<Map<Int, List<Pair<Double, Double>>>>): Double {
+    var speed = -1.0
+    var startNote = Pair(Double.MAX_VALUE, Double.MAX_VALUE)
+    var endNote = Pair(Double.MAX_VALUE, Double.MAX_VALUE)
+    var searchKey = -1
+    var startFrame = -1
+    for (f in notes.indices) {
+        val noteFrame = notes[f]
+        // find frame with at least one note
+        if (noteFrame.isNotEmpty()) {
+            // find lowest up note (easiest to find in the next frame)
+            for ((key, notes) in noteFrame) {
+                notes.forEach { point ->
+                    if (point.second < startNote.second) {
+                        startNote = point
+                        searchKey = key
+                    }
+                }
+            }
+        }
+        if (searchKey != -1) {
+            startFrame = f
+            break
+        }
+    }
+
+    // check if we found a valid startFrame
+    if (startFrame in 0 until (notes.size - 1)) { // exclude one frame as we need one after the startFrame
+        val noteFrame = notes[startFrame + 1]
+        if (noteFrame.containsKey(searchKey)) {
+            val keyNotes = noteFrame[searchKey]
+            keyNotes?.forEach { point ->
+                if (point.second < endNote.second) {
+                    endNote = point
+                }
+            }
+        }
+    }
+
+    if (startNote.second != Double.MAX_VALUE && endNote.second != Double.MAX_VALUE) {
+        speed = endNote.second - startNote.second
+    }
+
+    return speed
+}
+
+fun convertNotesToTimestamps(
+    // list of frame maps of keyIndex -> List of notes(top, bottom)
+    notes: List<Map<Int, List<Pair<Double, Double>>>>,
+    keyCount: Int,
+    height: Double
+): Timeline {
+    //val speed = estimateSpeed(notes) // TODO: not perfect but probably good enough for now
+    val speed = 12.3 / 2.0
+    val keyFocused = convertIntoKeyFocused(notes, keyCount)
+    val timeline = mutableListOf<List<Pair<Double, Double>>>()
+    return getTimeline(keyFocused, speed, height, timeline)
+}
+
+fun getTimeline(
+    keyFocused: List<List<List<Pair<Double, Double>>>>,
+    speed: Double,
+    height: Double,
+    timeline: MutableList<List<Pair<Double, Double>>>
+): Timeline {
+    var counter = 0
+    for (key in keyFocused) {
+        val keyTimeline = getKeyTimeline(key, speed, height)
+        //println("for key $counter, timeline: ${keyTimeline.joinToString(separator = ", ")}")
+        timeline.add(keyTimeline)
+        counter++
+    }
+    return Timeline(timeline)
+}
+
+fun convertIntoKeyFocused(
+    notes: List<Map<Int, List<Pair<Double, Double>>>>,
+    keyCount: Int
+): List<List<List<Pair<Double, Double>>>> {
+    // Structure: Key: frame: notes: note
+    val frameCount = notes.size
+    val keyFocused = mutableListOf<MutableList<MutableList<Pair<Double, Double>>>>()
+    for (k in 0 until keyCount) {
+        val keyList = mutableListOf<MutableList<Pair<Double, Double>>>()
+        for (f in 0 until frameCount) {
+            keyList.add(mutableListOf())
+        }
+        

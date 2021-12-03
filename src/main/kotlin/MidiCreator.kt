@@ -2,6 +2,7 @@ import javax.sound.midi.MidiEvent
 import javax.sound.midi.MidiSystem
 import javax.sound.midi.Sequence
 import javax.sound.midi.ShortMessage
+import kotlin.system.exitProcess
 
 fun main() {
     val numOfNotes = 20
@@ -22,30 +23,29 @@ fun main() {
     var i = 5
     while (i < 4 * numOfNotes + 5) {
         // Add Note On event
-        track.add(makeEvent(144, 1, i, 100, i));
+        track.add(makeEvent(144, 1, i, 100, i))
 
         // Add Note Off event
-        track.add(makeEvent(128, 1, i, 100, i + 2));
-
+        track.add(makeEvent(128, 1, i, 100, i + 2))
         i += 4
     }
 
     // Setting our sequence so that the sequencer can
     // run it on synthesizer
-    sequencer.setSequence(sequence);
+    sequencer.sequence = sequence
 
     // Specifies the beat rate in beats per minute.
-    sequencer.setTempoInBPM(220.toFloat())
+    sequencer.tempoInBPM = 220.toFloat()
 
     // Sequencer starts to play notes
-    sequencer.start();
+    sequencer.start()
 
     while (true) {
 
         // Exit the program when sequencer has stopped playing.
-        if (!sequencer.isRunning()) {
-            sequencer.close();
-            System.exit(1);
+        if (!sequencer.isRunning) {
+            sequencer.close()
+            exitProcess(1)
         }
     }
 }
