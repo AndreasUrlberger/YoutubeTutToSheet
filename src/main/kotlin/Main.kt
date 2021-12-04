@@ -23,9 +23,9 @@ import kotlin.system.measureTimeMillis
 // -XX:ParallelGCThreads=1
 // improves performance immensely
 fun main(args: Array<String>) {
-    if (args.size < 2)
+    if (args.size < 3)
         throw IllegalArgumentException("Missing program arguments, needed: 1. path to input file 2. path to where the output file should get stored")
-    Main(args[0], args[1]).start()
+    Main(args[0], args[1]).start(args[2])
 }
 
 class Main(private val filepathInput: String, private val filepathOutput: String) {
@@ -36,9 +36,12 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         OpenCV.loadLocally()
     }
 
-    fun start() {
-        //detectNotesInVideo()
-        createMidiFromTimeline()
+    fun start(command: String) {
+        when (command) {
+            "detectNotesInVideo" -> detectNotesInVideo()
+            "createMidi" -> createMidiFromMarkers(filepathInput.toDouble(), (1080 * 0.75).toInt())
+            else -> println("does not recognize the command '$command'")
+        }
     }
 
     private fun initKeys(
@@ -134,7 +137,56 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         val timeline = Json.decodeFromString<Timeline>(timelineString)
         val singleTimeline = convertInSingleTimeline(timeline)
         val shiftedTimeline = shiftTimelineToStart(singleTimeline)
-        createAndPlayMidi(shiftedTimeline)
+        createAndPlayMidi(shiftedTimeline, 52.0)
+    }
+
+    private fun createMidiFromMarkers(playSpeed: Double, imgHeight: Int) {
+        val markersString: String
+        FileInputStream("./output/noteMarkers.json").use {
+            markersString = it.readAllBytes().decodeToString()
+        }
+        val markers = Json.decodeFromString<NoteMarkers>(markersString)
+        val speed = estimateSpeed(markers.notes, imgHeight)
+        println("estimated Speed $speed")
+        if (speed == -1.0) {
+            throw IllegalStateException("could not get any speed information")
+        }
+        /*markers.notes.forEachIndexed { index, keyMarkers ->
+            if (index == 59) {
+                var (sum, weight) = estimateKeySpeed(keyMarkers, imgHeight)
+                val keySpeed = sum/weight
+                println("overall speed: $speed, keySpeed: $keySpeed, difference: ${keySpeed - speed}")
+                println("key 59 markers: ${keyMarkers.joinToString(separator = ", ")}")
+                var differences = ""
+                var lastMarker = -keySpeed
+                var currentOff = 0.0
+                sum = 0.0
+                var times = 0
+                keyMarkers.forEach { marker ->
+                    if (marker.isNotEmpty()) {
+                        val end = marker.getOrNull(0)?.first ?: lastMarker
+                        sum += end - lastMarker
+                        times++
+                        differences += ", ${end - currentOff}"
+                        currentOff += keySpeed
+                        lastMarker = end
+                    }
+                }
+                println("should have speed: ${sum/times}")
+                println("key $index differences: $differences")
+            }
+        }*/
+        val timeline = mutableListOf<List<Pair<Double, Double>>>()
+        val actualTimeline =
+            getTimeline(markers.notes, speed, (1080 * 0.75).toInt().toDouble(), timeline)
+        actualTimeline.timeline.forEachIndexed { index, keyTimeline ->
+            if (index == 59) {
+                println("key 59 timeline: ${keyTimeline.joinToString(separator = ", ")}")
+            }
+        }
+        val singleTimeline = convertInSingleTimeline(actualTimeline)
+        val shiftedTimeline = shiftTimelineToStart(singleTimeline)
+        createAndPlayMidi(shiftedTimeline, playSpeed)
     }
 
     private fun shiftTimelineToStart(timeline: List<Triple<Double, Int, Boolean>>): List<Triple<Double, Int, Boolean>> {
@@ -236,7 +288,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         return singleTimeline
     }
 
-    private fun createAndPlayMidi(timeline: List<Triple<Double, Int, Boolean>>) {
+    private fun createAndPlayMidi(timeline: List<Triple<Double, Int, Boolean>>, playSpeed: Double) {
         println("create midi")
         val sequencer = MidiSystem.getSequencer()
         sequencer.open()
@@ -257,7 +309,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                         1,
                         event.second + baseNote,
                         100,
-                        event.first.div(52).toInt()
+                        event.first.div(playSpeed).toInt()
                     )
                 )
             } else {
@@ -268,7 +320,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                         1,
                         event.second + baseNote,
                         100,
-                        event.first.div(52).toInt()
+                        event.first.div(playSpeed).toInt()
                     )
                 )
             }
@@ -443,11 +495,11 @@ fun getKeyTimeline(
 /**
  * If speed is negative then it is invalid.
  */
-private fun estimateSpeed(notes: List<List<List<Pair<Double, Double>>>>): Double {
+private fun estimateSpeed(notes: List<List<List<Pair<Double, Double>>>>, imgHeight: Int): Double {
     var speedSum = 0.0
     var weights = 0
     notes.forEach { key ->
-        val (offset, weight) = estimateKeySpeed(key)
+        val (offset, weight) = estimateKeySpeed(key, imgHeight)
         speedSum += offset
         weights += weight
     }
@@ -459,7 +511,10 @@ private fun estimateSpeed(notes: List<List<List<Pair<Double, Double>>>>): Double
     }
 }
 
-private fun estimateKeySpeed(key: List<List<Pair<Double, Double>>>): Pair<Double, Int> {
+private fun estimateKeySpeed(
+    key: List<List<Pair<Double, Double>>>,
+    imgHeight: Int
+): Pair<Double, Int> {
     if (key.size < 2) {
         return 0.0 to 0
     }
@@ -468,7 +523,8 @@ private fun estimateKeySpeed(key: List<List<Pair<Double, Double>>>): Pair<Double
     var divisor = 0 // the amount of times we actually calculated the cross offset
     for (frame in key) {
         if (frame.isNotEmpty() && lastFrame.isNotEmpty()) {
-            offsetSum += getCrossOffset(lastFrame, frame)
+            val offset = getCrossOffset(lastFrame, frame, imgHeight)
+            offsetSum += offset
             ++divisor
         }
         lastFrame = frame
@@ -482,8 +538,12 @@ fun convertNotesToTimestamps(
     notes: List<List<List<Pair<Double, Double>>>>,
     height: Double
 ): Timeline {
-    //val speed = estimateSpeed(notes) // TODO: not perfect but probably good enough for now
-    val speed = 12.3
+    val speed =
+        estimateSpeed(notes, height.toInt()) // TODO: not perfect but probably good enough for now
+    println("estimated Speed $speed")
+    if (speed == -1.0) {
+        return Timeline(listOf())
+    }
     val timeline = mutableListOf<List<Pair<Double, Double>>>()
     return getTimeline(notes, speed, height, timeline)
 }
@@ -530,18 +590,25 @@ fun convertIntoKeyFocused(
     return keyFocused
 }
 
-fun getCrossOffset(frame1: List<Pair<Double, Double>>, frame2: List<Pair<Double, Double>>): Double {
-    val end = frame1.maxOf { it.first }.roundToInt()
+fun getCrossOffset(
+    frame1: List<Pair<Double, Double>>,
+    frame2: List<Pair<Double, Double>>,
+    imgHeight: Int
+): Double {
+    val end = imgHeight
     var biggestCorrelation = 0.0
-    var bestOffset = 0
+    val bestScores = mutableListOf<Int>()
     for (offset in 1 until end) {
         val correlation = calculateCrossCorrelation(frame1, frame2, offset)
         if (correlation > biggestCorrelation) {
             biggestCorrelation = correlation
-            bestOffset = offset
+            bestScores.clear()
+            bestScores.add(offset)
+        } else if (correlation == biggestCorrelation) {
+            bestScores.add(offset)
         }
     }
-    return bestOffset.toDouble()
+    return bestScores.average()
 }
 
 fun calculateCrossCorrelation(
@@ -565,7 +632,7 @@ fun calculateCrossCorrelation(
     var frame2Open = false
     var lastPoint = 0.0
     points.forEach { point ->
-        if (frame1Open == frame2Open) { // both open or both closef
+        if (frame1Open && frame2Open) { // only add to score if open fields overlap
             equalDistance += point.first - lastPoint
         }
         if (point.second) { // frame1
@@ -576,7 +643,10 @@ fun calculateCrossCorrelation(
 
         lastPoint = point.first
     }
-    return equalDistance / (points.last().first) // gets a value between 0 and 1
+
+    val potentialOverlap =
+        (frame1.sumOf { it.second - it.first } + frame2.sumOf { it.second - it.first }) / 2.0
+    return equalDistance / potentialOverlap // gets a value between 0 and 1
 }
 
 @Serializable
