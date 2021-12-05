@@ -4,8 +4,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import nu.pattern.OpenCV
 import org.opencv.core.*
-import org.opencv.core.Core.bitwise_and
-import org.opencv.core.Core.split
+import org.opencv.core.Core.*
 import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc.*
 import org.opencv.videoio.VideoCapture
@@ -20,11 +19,10 @@ import kotlin.math.roundToInt
 import kotlin.system.exitProcess
 import kotlin.system.measureTimeMillis
 
+
 // -XX:ParallelGCThreads=1
 // improves performance immensely
 fun main(args: Array<String>) {
-    if (args.size < 3)
-        throw IllegalArgumentException("Missing program arguments, needed: 1. path to input file 2. path to where the output file should get stored")
     Main(args[0], args[1]).start(args[2])
 }
 
@@ -39,9 +37,32 @@ class Main(private val filepathInput: String, private val filepathOutput: String
     fun start(command: String) {
         when (command) {
             "detectNotesInVideo" -> detectNotesInVideo()
-            "createMidi" -> createMidiFromMarkers(filepathInput.toDouble(), (1080 * 0.75).toInt())
+            "createMidi" -> createMidiFromMarkers(filepathInput.toDouble(), (1080 * 0.25).toInt())
+            "appendImages" -> appendImages()
             else -> println("does not recognize the command '$command'")
         }
+    }
+
+    private fun appendImages() {
+        var imgOrinal = loadImage("./output/testFrame141.jpg") ?: throw IllegalArgumentException()
+        val img1 = imgOrinal.submat(0, (imgOrinal.height() * 0.75).toInt(), 0, imgOrinal.width())
+        val img2 = loadImage("./output/testFrame142.jpg") ?: throw IllegalArgumentException()
+        val thresholds = doubleArrayOf(80.0, 85.0, 80.0)
+        val channels1 = mutableListOf<Mat>()
+        val channels2 = mutableListOf<Mat>()
+        split(img1, channels1)
+        split(img2, channels2)
+        val thresh1 = computeAddedThresh(channels1, thresholds)
+        val thresh2 = computeAddedThresh(channels2, thresholds)
+        val result = Mat()
+        matchTemplate(thresh1, thresh2, result, TM_SQDIFF)
+        val mmr = Core.minMaxLoc(result)
+        println("minMax: ${mmr.minLoc}")
+        val cut = img2.submat(0, mmr.minLoc.y.roundToInt(), 0, img2.width())
+        val out = Mat()
+        vconcat(mutableListOf(cut, imgOrinal), out)
+        saveImage("./output/result.jpg", result)
+        saveImage("./output/appended.jpg", out)
     }
 
     private fun initKeys(
@@ -151,14 +172,14 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         if (speed == -1.0) {
             throw IllegalStateException("could not get any speed information")
         }
-        /*markers.notes.forEachIndexed { index, keyMarkers ->
-            if (index == 59) {
+        markers.notes.forEachIndexed { index, keyMarkers ->
+            if (index == 23) {
                 var (sum, weight) = estimateKeySpeed(keyMarkers, imgHeight)
-                val keySpeed = sum/weight
+                val keySpeed = sum / weight
                 println("overall speed: $speed, keySpeed: $keySpeed, difference: ${keySpeed - speed}")
-                println("key 59 markers: ${keyMarkers.joinToString(separator = ", ")}")
+                println("key $index markers: ${keyMarkers.joinToString(separator = ", ")}")
                 var differences = ""
-                var lastMarker = -keySpeed
+                var lastMarker = -speed
                 var currentOff = 0.0
                 sum = 0.0
                 var times = 0
@@ -168,24 +189,31 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                         sum += end - lastMarker
                         times++
                         differences += ", ${end - currentOff}"
-                        currentOff += keySpeed
+                        currentOff += speed
                         lastMarker = end
                     }
                 }
-                println("should have speed: ${sum/times}")
+                println("should have speed: ${sum / times}")
                 println("key $index differences: $differences")
             }
-        }*/
+        }
         val timeline = mutableListOf<List<Pair<Double, Double>>>()
         val actualTimeline =
-            getTimeline(markers.notes, speed, (1080 * 0.75).toInt().toDouble(), timeline)
+            getTimeline(markers.notes, speed, (1080 * 0.25).toInt().toDouble(), timeline)
         actualTimeline.timeline.forEachIndexed { index, keyTimeline ->
-            if (index == 59) {
-                println("key 59 timeline: ${keyTimeline.joinToString(separator = ", ")}")
+            if (index == 23) {
+                println("key $index timeline: ${keyTimeline.joinToString(separator = ", ")}")
             }
         }
         val singleTimeline = convertInSingleTimeline(actualTimeline)
         val shiftedTimeline = shiftTimelineToStart(singleTimeline)
+        val fps = 15.0
+        val bpm = 104.0
+        val bps = bpm / 60.0
+        val res = 480.0
+        val pxPerSec = speed * fps
+        val pxPerBeat = pxPerSec / bps
+        val playSpeed = pxPerBeat / res
         createAndPlayMidi(shiftedTimeline, playSpeed)
     }
 
@@ -207,7 +235,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
     private fun detectNotesInVideo() {
         val millis = measureTimeMillis {
             val frameWidth = 1920
-            val frameHeight = (1080 * 0.75).toInt()
+            val frameHeight = (1080 * 0.25).toInt()
             val cap = VideoCapture(filepathInput)
             val keys = mutableListOf<Pair<Double, Double>>()
             val (_, keyboardWidth) = initKeys('a', -3, 'c', 5, keys)
@@ -231,10 +259,12 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                 println("processing frame #$counter")
                 // Add a frame entry for each key
                 notes.forEach { keyList -> keyList.add(mutableListOf()) }
-                cut = Mat(frame, Rect(0, 0, frameWidth, frameHeight))
-
+                cut = frame.submat(frameHeight, frameHeight * 2, 0, frameWidth)
                 detectNotesInImage(cut, keyBorders, notes, counter)
 
+                for (i in 0 until 1) { // for every frame skip 3 more -> fps / 4
+                    cap.read(frame)
+                }
                 cap.read(frame)
                 counter++
             }
@@ -293,14 +323,20 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         val sequencer = MidiSystem.getSequencer()
         sequencer.open()
         // Creating a sequence.
-        val sequence = javax.sound.midi.Sequence(javax.sound.midi.Sequence.PPQ, 4)
+        val sequence = javax.sound.midi.Sequence(javax.sound.midi.Sequence.PPQ, 480)
         // PPQ(Pulse per ticks) is used to specify timing, type and 4 is the timing resolution.
         // Creating a track on our sequence upon which MIDI events would be placed
         val track = sequence.createTrack()
 
         val baseNote = 21 // the code of the lowest note on the piano, the A2
+        val timelineSorted = timeline.sortedBy { it.first }
         // Add events
-        timeline.forEach { event ->
+        timelineSorted.forEach { event ->
+            println(
+                "event at ${event.first.div(playSpeed)}, rounded ${
+                    event.first.div(playSpeed).roundToInt()
+                }"
+            )
             if (event.third) {
                 // on
                 track.add(
@@ -361,6 +397,13 @@ class Main(private val filepathInput: String, private val filepathOutput: String
 
         val white = Scalar(255.0, 255.0, 255.0)
         line(img, Point(0.0, 0.0), Point(img.width().toDouble(), 0.0), white, 1)
+        line(
+            img,
+            Point(0.0, img.height().minus(1).toDouble()),
+            Point(img.width().toDouble(), img.height().minus(1).toDouble()),
+            white,
+            1
+        )
         split(img, channels)
 
         val slices = mutableListOf<Mat>()
@@ -387,7 +430,13 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                     if (parent.toInt() != -1) {
                         val (top, bottom, width) = findTopBottomAndWidth(contours[x])
                         if (width >= widthThreshold) {
-                            //rectangle(img, Point(border.first, top-1), Point(border.second, bottom+1), Scalar(0.0, 0.0, 255.0), 2)
+                            rectangle(
+                                img,
+                                Point(border.first, top - 1),
+                                Point(border.second, bottom + 1),
+                                Scalar(0.0, 0.0, 255.0),
+                                2
+                            )
                             // We only look at inner contours, so it is safe to extend them by one
                             notes[keyIndex][frameIndex].add(Pair(top - 1, bottom + 1))
                         }
@@ -395,7 +444,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                 }
             }
         }
-        //saveImage("./slices/frame_$frameIndex.jpg", img)
+        //saveImage("./slices/slice_$frameIndex.jpg", img)
     }
 
     private fun findTopBottomAndWidth(elem: MatOfPoint): Triple<Double, Double, Double> {
