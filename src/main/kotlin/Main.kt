@@ -1,7 +1,3 @@
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
 import nu.pattern.OpenCV
 import org.opencv.core.*
 import org.opencv.core.Core.*
@@ -16,10 +12,8 @@ import javax.sound.midi.MidiSystem
 import javax.sound.midi.ShortMessage.NOTE_OFF
 import javax.sound.midi.ShortMessage.NOTE_ON
 import kotlin.math.abs
-import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.system.exitProcess
-import kotlin.system.measureTimeMillis
 
 
 // -XX:ParallelGCThreads=1
@@ -38,8 +32,6 @@ class Main(private val filepathInput: String, private val filepathOutput: String
 
     fun start(command: String) {
         when (command) {
-            "detectNotesInVideo" -> detectNotesInVideo()
-            "createMidi" -> createMidiFromMarkers(filepathInput.toDouble(), (1080 * 0.25).toInt())
             "getOffsets" -> getVideoOffsets()
             "mergeImages" -> mergeImages()
             "longImageToMidi" -> longImageToMidi()
@@ -49,7 +41,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
     }
 
     private fun longImageToMidi() {
-        val img = loadImage("./input/longImage.jpg") ?: throw FileNotFoundException()
+        val img = loadImage("./input/longImage.bmp") ?: throw FileNotFoundException()
         if (img.empty())
             throw IllegalArgumentException("Image is empty")
         val offsets = FileInputStream("./output/offsetsCorrected.txt").use {
@@ -69,23 +61,11 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                 ((old.second * pixelsPerInch).coerceAtMost(img.width().toDouble()))
             )
         }.toList()
-        val notes = mutableListOf<MutableList<MutableList<Pair<Double, Double>>>>()
-        keyBorders.indices.forEach { _ -> notes.add(mutableListOf()) }
-        notes.forEach { keyList -> keyList.add(mutableListOf()) }
-        detectNotesInImage(img, keyBorders, notes, 0)
+        val notes = mutableListOf<KeyEvent>()
+        detectNotesInImage(img, keyBorders, notes)
 
         // create Timeline
-        val timeline = mutableListOf<Triple<Double, Int, Boolean>>()
-        val height = img.height()
-        notes.forEachIndexed { keyIndex, keyNotes ->
-            keyNotes.forEach { frameNotes ->
-                frameNotes.forEach {
-                    timeline.add(Triple(height - it.second, keyIndex, true))
-                    timeline.add(Triple(height - it.first, keyIndex, false))
-                }
-            }
-        }
-        val shiftedTimeline = shiftTimelineToStart(timeline)
+        val shiftedTimeline = shiftTimelineToStart(notes)
 
         // create midi
         val fps = 15.0
@@ -168,7 +148,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         Mat(bigFrame, Range((bigFrame.height() * 0.25).toInt(), bigFrame.height())).copyTo(bigFrame)
         getFrame(cap, frame)
         var counter = 0
-        while (!frame.empty() && counter < 1800/*offsets.size*/) {
+        while (!frame.empty() && counter < offsets.size) {
             println("merge image #$counter")
             val cut = frame.submat(0, offsets[counter].plus(1).roundToInt(), 0, frame.width())
             vconcat(mutableListOf(cut, bigFrame), bigFrame)
@@ -180,7 +160,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             counter++
         }
         cap.release()
-        saveImage("./output/appended.jpg", bigFrame)
+        saveImage("./output/appended.bmp", bigFrame)
     }
 
     private fun getFrame(cap: VideoCapture, frame: Mat) {
@@ -277,175 +257,15 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             throw java.lang.IllegalArgumentException("keyHigh must be one of [a, h, c, d, e, f, g]")
     }
 
-    private fun createMidiFromTimeline() {
-        val timelineString: String
-        FileInputStream("./output/timeline.json").use {
-            timelineString = it.readAllBytes().decodeToString()
-        }
-        val timeline = Json.decodeFromString<Timeline>(timelineString)
-        val singleTimeline = convertInSingleTimeline(timeline)
-        val shiftedTimeline = shiftTimelineToStart(singleTimeline)
-        createAndPlayMidi(shiftedTimeline, 52.0)
-    }
-
-    private fun createMidiFromMarkers(playSpeed: Double, imgHeight: Int) {
-        val markersString: String
-        FileInputStream("./output/noteMarkers.json").use {
-            markersString = it.readAllBytes().decodeToString()
-        }
-        val markers = Json.decodeFromString<NoteMarkers>(markersString)
-        val speed = estimateSpeed(markers.notes, imgHeight)
-        println("estimated Speed $speed")
-        if (speed == -1.0) {
-            throw IllegalStateException("could not get any speed information")
-        }
-        markers.notes.forEachIndexed { index, keyMarkers ->
-            if (index == 23) {
-                var (sum, weight) = estimateKeySpeed(keyMarkers, imgHeight)
-                val keySpeed = sum / weight
-                println("overall speed: $speed, keySpeed: $keySpeed, difference: ${keySpeed - speed}")
-                println("key $index markers: ${keyMarkers.joinToString(separator = ", ")}")
-                var differences = ""
-                var lastMarker = -speed
-                var currentOff = 0.0
-                sum = 0.0
-                var times = 0
-                keyMarkers.forEach { marker ->
-                    if (marker.isNotEmpty()) {
-                        val end = marker.getOrNull(0)?.first ?: lastMarker
-                        sum += end - lastMarker
-                        times++
-                        differences += ", ${end - currentOff}"
-                        currentOff += speed
-                        lastMarker = end
-                    }
-                }
-                println("should have speed: ${sum / times}")
-                println("key $index differences: $differences")
-            }
-        }
-        val timeline = mutableListOf<List<Pair<Double, Double>>>()
-        val actualTimeline =
-            getTimeline(markers.notes, speed, (1080 * 0.25).toInt().toDouble(), timeline)
-        actualTimeline.timeline.forEachIndexed { index, keyTimeline ->
-            if (index == 23) {
-                println("key $index timeline: ${keyTimeline.joinToString(separator = ", ")}")
-            }
-        }
-        val singleTimeline = convertInSingleTimeline(actualTimeline)
-        val shiftedTimeline = shiftTimelineToStart(singleTimeline)
-        val fps = 15.0
-        val bpm = 104.0
-        val bps = bpm / 60.0
-        val res = 480.0
-        val pxPerSec = speed * fps
-        val pxPerBeat = pxPerSec / bps
-        val playSpeed = pxPerBeat / res
-        createAndPlayMidi(shiftedTimeline, playSpeed)
-    }
-
-    private fun shiftTimelineToStart(timeline: List<Triple<Double, Int, Boolean>>): List<Triple<Double, Int, Boolean>> {
+    private fun shiftTimelineToStart(timeline: List<KeyEvent>): List<KeyEvent> {
         if (timeline.isEmpty()) {
             return timeline
         }
-        val zeroLine = mutableListOf<Triple<Double, Int, Boolean>>()
-        var smallest = Double.MIN_VALUE
-        val offset = timeline.minOf { it.first }
-        timeline.forEach { note ->
-            smallest = min(smallest, note.first - offset)
-            zeroLine.add(Triple(note.first - offset, note.second, note.third))
-        }
-        println("offset: $offset smallest: $smallest")
-        return zeroLine
+        val offset = timeline.minOf { it.pos }
+        return timeline.map { KeyEvent(it.pos - offset, it.key, it.type, it.hand) }.toList()
     }
 
-    private fun detectNotesInVideo() {
-        val millis = measureTimeMillis {
-            val frameWidth = 1920
-            val frameHeight = (1080 * 0.25).toInt()
-            val cap = VideoCapture(filepathInput)
-            val keys = mutableListOf<Pair<Double, Double>>()
-            val (_, keyboardWidth) = initKeys('a', -3, 'c', 5, keys)
-            val pixelsPerInch = frameWidth / keyboardWidth
-            val keyBorders = keys.asSequence().map { old ->
-                Pair(
-                    old.first * pixelsPerInch,
-                    ((old.second * pixelsPerInch).coerceAtMost(frameWidth.toDouble()))
-                )
-            }.toList()
-            val notes = mutableListOf<MutableList<MutableList<Pair<Double, Double>>>>()
-            keyBorders.indices.forEach { _ -> notes.add(mutableListOf()) }
-
-            val frame = Mat()
-            var cut = Mat()
-
-            cap.read(frame)
-            var counter = 0
-            while (!frame.empty()) {
-                //if (counter % 10 == 0)
-                println("processing frame #$counter")
-                // Add a frame entry for each key
-                notes.forEach { keyList -> keyList.add(mutableListOf()) }
-                cut = frame.submat(frameHeight, frameHeight * 2, 0, frameWidth)
-                detectNotesInImage(cut, keyBorders, notes, counter)
-
-                for (i in 0 until 1) { // for every frame skip 3 more -> fps / 4
-                    cap.read(frame)
-                }
-                cap.read(frame)
-                counter++
-            }
-
-            cap.release()
-
-
-            // Save data
-            if (frameHeight <= 0) {
-                println("Failed at processing the images")
-            } else {
-                val noteObject = NoteMarkers(notes)
-                val noteString = Json.encodeToString(noteObject)
-                FileOutputStream("./output/noteMarkers.json").use {
-                    it.write(noteString.toByteArray())
-                }
-
-                val timeline = convertNotesToTimestamps(notes, frameHeight.toDouble())
-                val timelineString = Json.encodeToString(timeline)
-                FileOutputStream("./output/timeline.json").use {
-                    it.write(timelineString.toByteArray())
-                }
-            }
-        }
-        println("time needed: $millis ms")
-    }
-
-    private fun convertInSingleTimeline(timeline: Timeline): List<Triple<Double, Int, Boolean>> {
-        // Triple = (time, key, onOrOff)
-        val singleTimeline = mutableListOf<Triple<Double, Int, Boolean>>()
-        timeline.timeline.forEachIndexed { keyIndex, events ->
-            events.forEach { event ->
-                // adjust time
-                singleTimeline.add(
-                    Triple(
-                        event.first,
-                        keyIndex,
-                        true
-                    )
-                )
-                singleTimeline.add(
-                    Triple(
-                        event.second,
-                        keyIndex,
-                        false
-                    )
-                )
-            }
-        }
-        // might need to sort it
-        return singleTimeline
-    }
-
-    private fun createAndPlayMidi(timeline: List<Triple<Double, Int, Boolean>>, playSpeed: Double) {
+    private fun createAndPlayMidi(timeline: List<KeyEvent>, playSpeed: Double) {
         println("create midi")
         val sequencer = MidiSystem.getSequencer()
         sequencer.open()
@@ -456,23 +276,18 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         val track = sequence.createTrack()
 
         val baseNote = 21 // the code of the lowest note on the piano, the A2
-        val timelineSorted = timeline.sortedBy { it.first }
+        val timelineSorted = timeline.sortedBy { it.pos }
         // Add events
         timelineSorted.forEach { event ->
-            println(
-                "event at ${event.first.div(playSpeed)}, rounded ${
-                    event.first.div(playSpeed).roundToInt()
-                }"
-            )
-            if (event.third) {
+            if (event.type) {
                 // on
                 track.add(
                     makeEvent(
                         NOTE_ON,
                         1,
-                        event.second + baseNote,
+                        event.key + baseNote,
                         100,
-                        event.first.div(playSpeed).toInt()
+                        event.pos.div(playSpeed).roundToInt()
                     )
                 )
             } else {
@@ -481,9 +296,9 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                     makeEvent(
                         NOTE_OFF,
                         1,
-                        event.second + baseNote,
+                        event.key + baseNote,
                         100,
-                        event.first.div(playSpeed).toInt()
+                        event.pos.div(playSpeed).roundToInt()
                     )
                 )
             }
@@ -498,25 +313,13 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         println("storing midi file")
         val file = File("./output/midi.mid")
         MidiSystem.write(sequence, 0, file)
-        println("start playing")
-        // Sequencer starts to play notes
-        /*sequencer.start()
-        while (true) {
-
-            // Exit the program when sequencer has stopped playing.
-            if (!sequencer.isRunning) {
-                sequencer.close()
-                exitProcess(1)
-            }
-        }*/
         exitProcess(1)
     }
 
     private fun detectNotesInImage(
         img: Mat,
         keyBorders: List<Pair<Double, Double>>,
-        notes: MutableList<MutableList<MutableList<Pair<Double, Double>>>>,
-        frameIndex: Int
+        notes: MutableList<KeyEvent>,
     ) {
         val channels: MutableList<Mat> = mutableListOf()
         val contours = mutableListOf<MatOfPoint>()
@@ -565,13 +368,14 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                                 2
                             )
                             // We only look at inner contours, so it is safe to extend them by one
-                            notes[keyIndex][frameIndex].add(Pair(top - 1, bottom + 1))
+                            notes.add(KeyEvent(img.height() - (bottom + 1), keyIndex, true, 0))
+                            notes.add(KeyEvent(img.height() - (top - 1), keyIndex, false, 0))
                         }
                     }
                 }
             }
         }
-        saveImage("./slices/slice_$frameIndex.jpg", img)
+        saveImage("./slices/slice.jpg", img)
     }
 
     private fun findTopBottomAndWidth(elem: MatOfPoint): Triple<Double, Double, Double> {
@@ -595,9 +399,6 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         threshold(channels[0], threshBlue, limitBlue, 255.0, THRESH_BINARY)
         threshold(channels[1], threshGreen, limitGreen, 255.0, THRESH_BINARY)
         threshold(channels[2], threshRed, limitRed, 255.0, THRESH_BINARY)
-        /*saveImage("./threshBlue.jpg", threshBlue)
-        saveImage("./threshGreen.jpg", threshGreen)
-        saveImage("./threshRed.jpg", threshRed)*/
 
         val addedThresh = Mat()
         bitwise_and(threshBlue, threshGreen, addedThresh)
@@ -614,164 +415,14 @@ class Main(private val filepathInput: String, private val filepathOutput: String
     }
 }
 
-/**
- * Returns a list containing a Pair<Start, End> for each note. The unit of Start and End are
- * pixels.
- */
-fun getKeyTimeline(
-    key: List<List<Pair<Double, Double>>>,
-    speed: Double,
-    height: Double
-): List<Pair<Double, Double>> {
-    val timeline = mutableListOf<Pair<Double, Double>>()
-    var currentTime = 0.0
-    // add a timestamp for every note and frame, they are probably overlapping quite a lot
-    for (frame in key) {
-        frame.forEach { note ->
-            val start = currentTime + (height - note.second)
-            val end = currentTime + (height - note.first)
-            timeline.add(Pair(start, end))
-        }
-
-        currentTime += speed
-    }
-
-    if (timeline.isEmpty()) {
-        return listOf()
-    }
-
-    // in: (top, bottom) (0, 24)
-    // -> (top, bottom) (100, 76)
-    // sort notes to make finding overlapping ones easier
-    timeline.sortBy { note -> note.first }
-    // combine overlapping notes
-    val cleanTimeline = mutableListOf(timeline.first())
-    var previousEnd: Double =
-        timeline.firstOrNull()?.second ?: (height + 1) // bigger than anything possible
-    for (note in timeline) {
-        if (previousEnd >= note.first) {
-            // this note is the same as the previous, thus we might have to extend the previous
-            if (note.second < previousEnd) {
-                // extend the previous one
-                val last = cleanTimeline.removeLast()
-                cleanTimeline.add(Pair(last.first, note.second))
-                previousEnd = note.second
-            }
-        } else {
-            // this is a new note
-            cleanTimeline.add(note)
-            previousEnd = note.second
-        }
-    }
-
-    return cleanTimeline
-}
-
-
-/**
- * If speed is negative then it is invalid.
- */
-private fun estimateSpeed(notes: List<List<List<Pair<Double, Double>>>>, imgHeight: Int): Double {
-    var speedSum = 0.0
-    var weights = 0
-    notes.forEach { key ->
-        val (offset, weight) = estimateKeySpeed(key, imgHeight)
-        speedSum += offset
-        weights += weight
-    }
-
-    if (weights == 0) {
-        return -1.0
-    } else {
-        return speedSum / weights
-    }
-}
-
-private fun estimateKeySpeed(
-    key: List<List<Pair<Double, Double>>>,
-    imgHeight: Int
-): Pair<Double, Int> {
-    if (key.size < 2) {
-        return 0.0 to 0
-    }
-    var offsetSum = 0.0
-    var lastFrame = listOf<Pair<Double, Double>>()
-    var divisor = 0 // the amount of times we actually calculated the cross offset
-    for (frame in key) {
-        if (frame.isNotEmpty() && lastFrame.isNotEmpty()) {
-            val offset = getCrossOffset(lastFrame, frame, imgHeight)
-            offsetSum += offset
-            ++divisor
-        }
-        lastFrame = frame
-    }
-
-    return offsetSum to divisor
-}
-
-fun convertNotesToTimestamps(
-    // list of frame maps of keyIndex -> List of notes(top, bottom)
-    notes: List<List<List<Pair<Double, Double>>>>,
-    height: Double
-): Timeline {
-    val speed =
-        estimateSpeed(notes, height.toInt()) // TODO: not perfect but probably good enough for now
-    println("estimated Speed $speed")
-    if (speed == -1.0) {
-        return Timeline(listOf())
-    }
-    val timeline = mutableListOf<List<Pair<Double, Double>>>()
-    return getTimeline(notes, speed, height, timeline)
-}
-
-fun getTimeline(
-    keyFocused: List<List<List<Pair<Double, Double>>>>,
-    speed: Double,
-    height: Double,
-    timeline: MutableList<List<Pair<Double, Double>>>
-): Timeline {
-    for (key in keyFocused) {
-        val keyTimeline = getKeyTimeline(key, speed, height)
-        timeline.add(keyTimeline)
-    }
-    return Timeline(timeline)
-}
-
-fun convertIntoKeyFocused(
-    notes: List<Map<Int, List<Pair<Double, Double>>>>,
-    keyCount: Int
-): List<List<List<Pair<Double, Double>>>> {
-    // Structure: Key: frame: notes: note
-    val frameCount = notes.size
-    val keyFocused = mutableListOf<MutableList<MutableList<Pair<Double, Double>>>>()
-    for (k in 0 until keyCount) {
-        val keyList = mutableListOf<MutableList<Pair<Double, Double>>>()
-        for (f in 0 until frameCount) {
-            keyList.add(mutableListOf())
-        }
-        keyFocused.add(keyList)
-    }
-
-    notes.forEachIndexed { fIndex, frame ->
-        frame.forEach { (kIndex, key) ->
-            key.sortedBy { note -> note.second }.forEach { note ->
-                keyFocused[kIndex][fIndex].add(note)
-            }
-        }
-    }
-
-    return keyFocused
-}
-
 fun getCrossOffset(
     frame1: List<Pair<Double, Double>>,
     frame2: List<Pair<Double, Double>>,
     imgHeight: Int
 ): Double {
-    val end = imgHeight
     var biggestCorrelation = 0.0
     val bestScores = mutableListOf<Int>()
-    for (offset in 1 until end) {
+    for (offset in 1 until imgHeight) {
         val correlation = calculateCrossCorrelation(frame1, frame2, offset)
         if (correlation > biggestCorrelation) {
             biggestCorrelation = correlation
@@ -822,8 +473,4 @@ fun calculateCrossCorrelation(
     return equalDistance / potentialOverlap // gets a value between 0 and 1
 }
 
-@Serializable
-data class Timeline(val timeline: List<List<Pair<Double, Double>>>)
-
-@Serializable
-data class NoteMarkers(val notes: MutableList<MutableList<MutableList<Pair<Double, Double>>>>)
+data class KeyEvent(val pos: Double, val key: Int, val type: Boolean, val hand: Int)
