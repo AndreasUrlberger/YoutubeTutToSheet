@@ -40,7 +40,8 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         when (command) {
             "detectNotesInVideo" -> detectNotesInVideo()
             "createMidi" -> createMidiFromMarkers(filepathInput.toDouble(), (1080 * 0.25).toInt())
-            "appendImages" -> appendImages()
+            "getOffsets" -> getVideoOffsets()
+            "mergeImages" -> mergeImages()
             "longImageToMidi" -> longImageToMidi()
 
             else -> println("does not recognize the command '$command'")
@@ -93,11 +94,11 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         val res = 480.0
         val pxPerSec = offsets.average() * fps
         val pxPerBeat = pxPerSec / bps
-        val playSpeed = (pxPerBeat / res) * 1.066666
+        val playSpeed = (pxPerBeat / res)
         createAndPlayMidi(shiftedTimeline, playSpeed)
     }
 
-    private fun appendImages() {
+    private fun getVideoOffsets() {
         val cap = VideoCapture("./input/theme.mp4")
         val frame = Mat()
         var oldFrame: Mat
@@ -146,8 +147,6 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         FileOutputStream("./output/offsetsCorrected.txt").use {
             it.write(correctedOffsets.joinToString(", ").toByteArray())
         }
-
-        mergeImages(correctedOffsets)
     }
 
     private fun median(list: List<Double>) = list.sorted().let {
@@ -157,7 +156,11 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             it[it.size / 2]
     }
 
-    private fun mergeImages(offsets: List<Double>) {
+    private fun mergeImages() {
+        val offsets = FileInputStream("./output/offsetsCorrected.txt").use {
+            it.readAllBytes().decodeToString().splitToSequence(", ").map { elem -> elem.toDouble() }
+                .toList()
+        }
         val cap = VideoCapture("./input/theme.mp4")
         val frame = Mat()
         val bigFrame = Mat()
@@ -165,11 +168,14 @@ class Main(private val filepathInput: String, private val filepathOutput: String
         Mat(bigFrame, Range((bigFrame.height() * 0.25).toInt(), bigFrame.height())).copyTo(bigFrame)
         getFrame(cap, frame)
         var counter = 0
-        while (!frame.empty() && counter < offsets.size) {
+        while (!frame.empty() && counter < 1800/*offsets.size*/) {
             println("merge image #$counter")
             val cut = frame.submat(0, offsets[counter].plus(1).roundToInt(), 0, frame.width())
             vconcat(mutableListOf(cut, bigFrame), bigFrame)
 
+            for (i in 1 until 4) {
+                getFrame(cap, frame)
+            }
             getFrame(cap, frame)
             counter++
         }
@@ -724,12 +730,9 @@ fun getTimeline(
     height: Double,
     timeline: MutableList<List<Pair<Double, Double>>>
 ): Timeline {
-    var counter = 0
     for (key in keyFocused) {
         val keyTimeline = getKeyTimeline(key, speed, height)
-        //println("for key $counter, timeline: ${keyTimeline.joinToString(separator = ", ")}")
         timeline.add(keyTimeline)
-        counter++
     }
     return Timeline(timeline)
 }
