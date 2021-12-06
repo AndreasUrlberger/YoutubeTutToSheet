@@ -10,10 +10,12 @@ import org.opencv.imgproc.Imgproc.*
 import org.opencv.videoio.VideoCapture
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import javax.sound.midi.MidiSystem
 import javax.sound.midi.ShortMessage.NOTE_OFF
 import javax.sound.midi.ShortMessage.NOTE_ON
+import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.system.exitProcess
@@ -39,30 +41,149 @@ class Main(private val filepathInput: String, private val filepathOutput: String
             "detectNotesInVideo" -> detectNotesInVideo()
             "createMidi" -> createMidiFromMarkers(filepathInput.toDouble(), (1080 * 0.25).toInt())
             "appendImages" -> appendImages()
+            "longImageToMidi" -> longImageToMidi()
+
             else -> println("does not recognize the command '$command'")
         }
     }
 
+    private fun longImageToMidi() {
+        val img = loadImage("./input/longImage.jpg") ?: throw FileNotFoundException()
+        if (img.empty())
+            throw IllegalArgumentException("Image is empty")
+        val offsets = FileInputStream("./output/offsetsCorrected.txt").use {
+            it.readAllBytes().decodeToString().splitToSequence(", ").map { elem -> elem.toDouble() }
+                .toList()
+        }
+        if (offsets.isEmpty())
+            throw IllegalArgumentException("The offsets cannot be empty")
+
+        // detect notes
+        val keys = mutableListOf<Pair<Double, Double>>()
+        val (_, keyboardWidth) = initKeys('a', -3, 'c', 5, keys)
+        val pixelsPerInch = img.width() / keyboardWidth
+        val keyBorders = keys.asSequence().map { old ->
+            Pair(
+                old.first * pixelsPerInch,
+                ((old.second * pixelsPerInch).coerceAtMost(img.width().toDouble()))
+            )
+        }.toList()
+        val notes = mutableListOf<MutableList<MutableList<Pair<Double, Double>>>>()
+        keyBorders.indices.forEach { _ -> notes.add(mutableListOf()) }
+        notes.forEach { keyList -> keyList.add(mutableListOf()) }
+        detectNotesInImage(img, keyBorders, notes, 0)
+
+        // create Timeline
+        val timeline = mutableListOf<Triple<Double, Int, Boolean>>()
+        val height = img.height()
+        notes.forEachIndexed { keyIndex, keyNotes ->
+            keyNotes.forEach { frameNotes ->
+                frameNotes.forEach {
+                    timeline.add(Triple(height - it.second, keyIndex, true))
+                    timeline.add(Triple(height - it.first, keyIndex, false))
+                }
+            }
+        }
+        val shiftedTimeline = shiftTimelineToStart(timeline)
+
+        // create midi
+        val fps = 15.0
+        val bpm = 104.0
+        val bps = bpm / 60.0
+        val res = 480.0
+        val pxPerSec = offsets.average() * fps
+        val pxPerBeat = pxPerSec / bps
+        val playSpeed = (pxPerBeat / res) * 1.066666
+        createAndPlayMidi(shiftedTimeline, playSpeed)
+    }
+
     private fun appendImages() {
-        var imgOrinal = loadImage("./output/testFrame141.jpg") ?: throw IllegalArgumentException()
-        val img1 = imgOrinal.submat(0, (imgOrinal.height() * 0.75).toInt(), 0, imgOrinal.width())
-        val img2 = loadImage("./output/testFrame142.jpg") ?: throw IllegalArgumentException()
-        val thresholds = doubleArrayOf(80.0, 85.0, 80.0)
-        val channels1 = mutableListOf<Mat>()
-        val channels2 = mutableListOf<Mat>()
-        split(img1, channels1)
-        split(img2, channels2)
-        val thresh1 = computeAddedThresh(channels1, thresholds)
-        val thresh2 = computeAddedThresh(channels2, thresholds)
-        val result = Mat()
-        matchTemplate(thresh1, thresh2, result, TM_SQDIFF)
-        val mmr = Core.minMaxLoc(result)
-        println("minMax: ${mmr.minLoc}")
-        val cut = img2.submat(0, mmr.minLoc.y.roundToInt(), 0, img2.width())
-        val out = Mat()
-        vconcat(mutableListOf(cut, imgOrinal), out)
-        saveImage("./output/result.jpg", result)
-        saveImage("./output/appended.jpg", out)
+        val cap = VideoCapture("./input/theme.mp4")
+        val frame = Mat()
+        var oldFrame: Mat
+        val offsets = mutableListOf<Double>()
+        getFrame(cap, frame)
+        if (!frame.empty()) {
+            var counter = 0
+            oldFrame = frame.submat(0, (frame.height() * 0.75).toInt(), 0, frame.width())
+            getFrame(cap, frame)
+            while (!frame.empty() && counter < 1_000_000) {
+                if (counter % 20 == 0)
+                    println("processing image #$counter")
+                val thresholds = doubleArrayOf(80.0, 85.0, 80.0)
+                val channels1 = mutableListOf<Mat>()
+                val channels2 = mutableListOf<Mat>()
+                split(oldFrame, channels1)
+                split(frame, channels2)
+                val thresh1 = computeAddedThresh(channels1, thresholds)
+                val thresh2 = computeAddedThresh(channels2, thresholds)
+                val result = Mat()
+                matchTemplate(thresh1, thresh2, result, TM_SQDIFF)
+                val mmr = minMaxLoc(result)
+                offsets.add(mmr.minLoc.y)
+                //println("$counter minMax: ${mmr.minLoc}")
+                //saveImage("./output/thresh$counter.jpg", thresh1)
+
+                oldFrame = frame.submat(0, (frame.height() * 0.75).toInt(), 0, frame.width())
+                for (i in 1 until 4) {
+                    getFrame(cap, frame)
+                }
+                getFrame(cap, frame)
+                counter++
+            }
+        }
+        cap.release()
+
+        FileOutputStream("./output/offsetsReal.txt").use {
+            it.write(offsets.joinToString(", ").toByteArray())
+        }
+
+        val median = median(offsets)
+        val correctedOffsets =
+            offsets.map { value -> if (abs(value - median) > median * 0.25) median else value }
+                .toList()
+
+        FileOutputStream("./output/offsetsCorrected.txt").use {
+            it.write(correctedOffsets.joinToString(", ").toByteArray())
+        }
+
+        mergeImages(correctedOffsets)
+    }
+
+    private fun median(list: List<Double>) = list.sorted().let {
+        if (it.size % 2 == 0)
+            (it[it.size / 2] + it[(it.size - 1) / 2]) / 2
+        else
+            it[it.size / 2]
+    }
+
+    private fun mergeImages(offsets: List<Double>) {
+        val cap = VideoCapture("./input/theme.mp4")
+        val frame = Mat()
+        val bigFrame = Mat()
+        cap.read(bigFrame)
+        Mat(bigFrame, Range((bigFrame.height() * 0.25).toInt(), bigFrame.height())).copyTo(bigFrame)
+        getFrame(cap, frame)
+        var counter = 0
+        while (!frame.empty() && counter < offsets.size) {
+            println("merge image #$counter")
+            val cut = frame.submat(0, offsets[counter].plus(1).roundToInt(), 0, frame.width())
+            vconcat(mutableListOf(cut, bigFrame), bigFrame)
+
+            getFrame(cap, frame)
+            counter++
+        }
+        cap.release()
+        saveImage("./output/appended.jpg", bigFrame)
+    }
+
+    private fun getFrame(cap: VideoCapture, frame: Mat) {
+        cap.read(frame)
+        if (!frame.empty())
+            Mat(
+                frame,
+                Range((frame.height() * 0.25).toInt(), (frame.height() * 0.50).toInt())
+            ).copyTo(frame)
     }
 
     private fun initKeys(
@@ -444,7 +565,7 @@ class Main(private val filepathInput: String, private val filepathOutput: String
                 }
             }
         }
-        //saveImage("./slices/slice_$frameIndex.jpg", img)
+        saveImage("./slices/slice_$frameIndex.jpg", img)
     }
 
     private fun findTopBottomAndWidth(elem: MatOfPoint): Triple<Double, Double, Double> {
