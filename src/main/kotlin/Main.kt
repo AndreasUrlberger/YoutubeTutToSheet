@@ -82,8 +82,13 @@ private fun getVideoOffsets() {
         oldFrame = frame.submat(0, (frame.height() * 0.75).toInt(), 0, frame.width())
         getFrame(cap, frame)
         while (!frame.empty() && counter < 1_000_000) {
-            if (counter % 20 == 0)
+            if (counter % 20 == 0) {
                 println("processing image #$counter")
+            }
+            if (counter % 100 == 0) {
+                System.gc()
+            }
+
             val thresholds = doubleArrayOf(80.0, 85.0, 80.0)
             val channels1 = mutableListOf<Mat>()
             val channels2 = mutableListOf<Mat>()
@@ -151,6 +156,9 @@ private fun mergeImages() {
         }
         getFrame(cap, frame)
         counter++
+        if (counter % 100 == 0) {
+            System.gc()
+        }
     }
     cap.release()
     saveImage("./output/appended.bmp", bigFrame)
@@ -365,7 +373,7 @@ private fun detectNotesInImage(
 }
 
 private fun getHand(colors: DoubleArray): Int {
-    // blue green red
+    // (blue, green, red)
     return if (colors[0] > colors[1]) { // more blue than green
         1
     } else {
