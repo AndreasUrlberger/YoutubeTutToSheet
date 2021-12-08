@@ -8,28 +8,55 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.io.FileOutputStream
+import java.nio.file.Files
 import javax.sound.midi.MidiSystem
 import javax.sound.midi.ShortMessage.NOTE_OFF
 import javax.sound.midi.ShortMessage.NOTE_ON
+import kotlin.io.path.Path
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.system.exitProcess
 
+private var IMAGES_TO_SKIP = 0
+private var INPUT_FPS = 0.0
+private fun FPS() = INPUT_FPS / (IMAGES_TO_SKIP + 1)
+private var BPM = 0.0
+private var MIDI_RES = 0.0
 
-// -XX:ParallelGCThreads=1
-// improves performance immensely
+private var VIDEO_PATH = ""
+
+private var KEY_START = 'a'
+private var KEY_START_NUM = -3
+private var KEY_END = 'c'
+private var KEY_END_NUM = 5
+
 fun main(args: Array<String>) {
     OpenCV.loadLocally()
-    start(args[2])
-}
+    when (args[0]) {
+        "getOffsets" -> {
+            VIDEO_PATH = args[1]
+            if (Files.notExists(Path(VIDEO_PATH)))
+                throw FileNotFoundException("Could not find video at '$VIDEO_PATH'")
+            INPUT_FPS = args[2].toDouble()
+            IMAGES_TO_SKIP = args[3].toInt()
+            getVideoOffsets()
+        }
+        "mergeImages" -> {
+            VIDEO_PATH = args[1]
+            if (Files.notExists(Path(VIDEO_PATH)))
+                throw FileNotFoundException("Could not find video at '$VIDEO_PATH'")
+            IMAGES_TO_SKIP = args[2].toInt()
+            mergeImages()
+        }
+        "longImageToMidi" -> {
+            INPUT_FPS = args[1].toDouble()
+            IMAGES_TO_SKIP = args[2].toInt()
+            BPM = args[3].toDouble()
+            MIDI_RES = args.getOrNull(4)?.toDouble() ?: 480.0
+            longImageToMidi()
+        }
 
-fun start(command: String) {
-    when (command) {
-        "getOffsets" -> getVideoOffsets()
-        "mergeImages" -> mergeImages()
-        "longImageToMidi" -> longImageToMidi()
-
-        else -> println("does not recognize the command '$command'")
+        else -> println("does not recognize the command '${args[0]}'")
     }
 }
 
@@ -46,7 +73,7 @@ private fun longImageToMidi() {
 
     // detect notes
     val keys = mutableListOf<Pair<Double, Double>>()
-    val (_, keyboardWidth) = initKeys('a', -3, 'c', 5, keys)
+    val (_, keyboardWidth) = initKeys(keys)
     val pixelsPerInch = img.width() / keyboardWidth
     val keyBorders = keys.asSequence().map { old ->
         Pair(
@@ -61,18 +88,16 @@ private fun longImageToMidi() {
     val shiftedTimeline = shiftTimelineToStart(notes)
 
     // create midi
-    val fps = 15.0
-    val bpm = 146.0
-    val bps = bpm / 60.0
-    val res = 480.0
-    val pxPerSec = offsets.average() * fps
+    val bps = BPM / 60.0
+    val pxPerSec = offsets.average() * FPS()
+    println("pixel per second $pxPerSec")
     val pxPerBeat = pxPerSec / bps
-    val playSpeed = (pxPerBeat / res)
+    val playSpeed = (pxPerBeat / MIDI_RES)
     createMidi(shiftedTimeline, playSpeed)
 }
 
 private fun getVideoOffsets() {
-    val cap = VideoCapture("./input/theme.mp4")
+    val cap = VideoCapture(VIDEO_PATH)
     val frame = Mat()
     var oldFrame: Mat
     val offsets = mutableListOf<Double>()
@@ -104,7 +129,7 @@ private fun getVideoOffsets() {
             //saveImage("./output/thresh$counter.jpg", thresh1)
 
             oldFrame = frame.submat(0, (frame.height() * 0.75).toInt(), 0, frame.width())
-            for (i in 1 until 4) {
+            for (i in 0 until IMAGES_TO_SKIP) {
                 getFrame(cap, frame)
             }
             getFrame(cap, frame)
@@ -112,10 +137,6 @@ private fun getVideoOffsets() {
         }
     }
     cap.release()
-
-    FileOutputStream("./output/offsetsReal.txt").use {
-        it.write(offsets.joinToString(", ").toByteArray())
-    }
 
     val median = median(offsets)
     val correctedOffsets =
@@ -139,7 +160,7 @@ private fun mergeImages() {
         it.readAllBytes().decodeToString().splitToSequence(", ").map { elem -> elem.toDouble() }
             .toList()
     }
-    val cap = VideoCapture("./input/theme.mp4")
+    val cap = VideoCapture(VIDEO_PATH)
     val frame = Mat()
     val bigFrame = Mat()
     cap.read(bigFrame)
@@ -151,7 +172,7 @@ private fun mergeImages() {
         val cut = frame.submat(0, offsets[counter].plus(1).roundToInt(), 0, frame.width())
         vconcat(mutableListOf(cut, bigFrame), bigFrame)
 
-        for (i in 1 until 4) {
+        for (i in 0 until IMAGES_TO_SKIP) {
             getFrame(cap, frame)
         }
         getFrame(cap, frame)
@@ -174,14 +195,10 @@ private fun getFrame(cap: VideoCapture, frame: Mat) {
 }
 
 private fun initKeys(
-    keyLow: Char,
-    lowNum: Int,
-    keyHigh: Char,
-    highNum: Int,
     outKeys: MutableList<Pair<Double, Double>>
 ): Pair<Int, Double> {
     val keyCodes = mapOf('a' to 9, 'h' to 11, 'c' to 0, 'd' to 2, 'e' to 4, 'f' to 5, 'g' to 7)
-    checkBorderKeys(lowNum, highNum, keyLow, keyHigh)
+    checkBorderKeys(KEY_START_NUM, KEY_END_NUM, KEY_START, KEY_END)
 
     val keyDimensions = listOf(
         // (left position relative to the start of last octave, width of the key, isWhiteKey)
@@ -204,7 +221,7 @@ private fun initKeys(
     var xOffset = 0.0
     var width = 0.0
     // lower single keys
-    for (key in (keyCodes[keyLow] ?: 0)..(keyCodes.values.maxOrNull() ?: 0)) {
+    for (key in (keyCodes[KEY_START] ?: 0)..(keyCodes.values.maxOrNull() ?: 0)) {
         val dim = keyDimensions[key]
         if (dim.third) { // white key
             outKeys.add(Pair(xOffset, xOffset + dim.second))
@@ -216,7 +233,7 @@ private fun initKeys(
         }
     }
     // octave keys
-    for (scale in (lowNum + 1) until highNum) {
+    for (scale in (KEY_START_NUM + 1) until KEY_END_NUM) {
         for (key in keyDimensions.indices) {
             val dim = keyDimensions[key]
             if (dim.third) { // white key
@@ -230,7 +247,7 @@ private fun initKeys(
         }
     }
     // upper single keys
-    for (key in (keyCodes.values.minOrNull() ?: 0)..(keyCodes[keyHigh] ?: 0)) {
+    for (key in (keyCodes.values.minOrNull() ?: 0)..(keyCodes[KEY_END] ?: 0)) {
         val dim = keyDimensions[key]
         if (dim.third) { // white key
             outKeys.add(Pair(xOffset, xOffset + dim.second))
@@ -271,7 +288,7 @@ private fun createMidi(timeline: List<KeyEvent>, playSpeed: Double) {
     val sequencer = MidiSystem.getSequencer()
     sequencer.open()
     // Creating a sequence.
-    val sequence = javax.sound.midi.Sequence(javax.sound.midi.Sequence.PPQ, 480)
+    val sequence = javax.sound.midi.Sequence(javax.sound.midi.Sequence.PPQ, MIDI_RES.toInt())
     // PPQ(Pulse per ticks) is used to specify timing, type and 4 is the timing resolution.
 
 
@@ -297,7 +314,7 @@ private fun createMidi(timeline: List<KeyEvent>, playSpeed: Double) {
     sequencer.sequence = sequence
 
     // Specifies the beat rate in beats per minute.
-    sequencer.tempoInBPM = 146.toFloat()
+    sequencer.tempoInBPM = BPM.toFloat()
 
     println("storing midi file")
     val file = File("./output/midi.mid")
@@ -315,7 +332,6 @@ private fun detectNotesInImage(
     val hierarchy = Mat()
 
     val white = Scalar(255.0, 255.0, 255.0)
-    println("value ${img.get(50, (img.width() * 0.9).toInt()).joinToString(", ")}")
     line(img, Point(0.0, 0.0), Point(img.width().toDouble(), 0.0), white, 1)
     line(
         img,
@@ -352,10 +368,13 @@ private fun detectNotesInImage(
                     val (top, bottom) = vertical
                     val (left, right) = horizontal
                     if (right - left >= widthThreshold) {
-                        /*rectangle(
-                            img, Point(border.first, top - 1), Point(border.second, bottom + 1),
-                            Scalar(0.0, 0.0, 255.0), 2
-                        )*/
+                        rectangle(
+                            img,
+                            Point(border.first - sliceWidth * 0.2 + left, top - 1),
+                            Point(border.first - sliceWidth * 0.2 + right, bottom + 1),
+                            Scalar(0.0, 0.0, 255.0),
+                            3
+                        )
                         // Get correct hand
                         val middleX = ((bottom + top) / 2).toInt()
                         val middleY = ((left + right) / 2 + border.first - sliceWidth * 0.2).toInt()
@@ -415,65 +434,6 @@ private fun loadImage(imagePath: String): Mat? {
 
 private fun saveImage(path: String, image: Mat) {
     Imgcodecs.imwrite(path, image)
-}
-
-
-fun getCrossOffset(
-    frame1: List<Pair<Double, Double>>,
-    frame2: List<Pair<Double, Double>>,
-    imgHeight: Int
-): Double {
-    var biggestCorrelation = 0.0
-    val bestScores = mutableListOf<Int>()
-    for (offset in 1 until imgHeight) {
-        val correlation = calculateCrossCorrelation(frame1, frame2, offset)
-        if (correlation > biggestCorrelation) {
-            biggestCorrelation = correlation
-            bestScores.clear()
-            bestScores.add(offset)
-        } else if (correlation == biggestCorrelation) {
-            bestScores.add(offset)
-        }
-    }
-    return bestScores.average()
-}
-
-fun calculateCrossCorrelation(
-    frame1: List<Pair<Double, Double>>,
-    frame2: List<Pair<Double, Double>>,
-    offset: Int
-): Double {
-    val points = mutableListOf<Pair<Double, Boolean>>()
-    frame1.forEach { note ->
-        points.add(Pair(note.first + offset, true))
-        points.add(Pair(note.second + offset, true))
-    }
-    frame2.forEach { note ->
-        points.add(Pair(note.first, false))
-        points.add(Pair(note.second, false))
-    }
-
-    var equalDistance = 0.0
-    points.sortBy { it.first }
-    var frame1Open = false
-    var frame2Open = false
-    var lastPoint = 0.0
-    points.forEach { point ->
-        if (frame1Open && frame2Open) { // only add to score if open fields overlap
-            equalDistance += point.first - lastPoint
-        }
-        if (point.second) { // frame1
-            frame1Open = !frame1Open
-        } else {
-            frame2Open = !frame2Open
-        }
-
-        lastPoint = point.first
-    }
-
-    val potentialOverlap =
-        (frame1.sumOf { it.second - it.first } + frame2.sumOf { it.second - it.first }) / 2.0
-    return equalDistance / potentialOverlap // gets a value between 0 and 1
 }
 
 data class KeyEvent(val pos: Double, val key: Int, val type: Boolean, val hand: Int)
