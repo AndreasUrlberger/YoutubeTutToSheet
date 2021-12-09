@@ -14,8 +14,8 @@ fun main(args: Array<String>) {
 
     OpenCV.loadLocally()
     var big = loadImage(args[0])
-    //big = big.submat(0, (big.height() * 0.5).toInt(), 0, big.width())
-    extractPatrickHands(big)
+    big = big.submat(0, (big.height() * 0.5).toInt(), 0, big.width())
+    extractPatrickNotes(big)
 }
 
 private fun videoSetup(img: Mat) {
@@ -51,11 +51,10 @@ private fun videoSetup(img: Mat) {
 }
 
 private fun extractPatrickHands(big: Mat) {
-    val img = big.submat((big.height() * 0.5).toInt(), big.height(), 0, big.width())
-    saveImage("output/img.jpg", img)
+
 }
 
-private fun extractPatrickNotes(img: Mat): Mat {
+fun extractPatrickNotes(img: Mat): Mat {
     val rgbChannels = mutableListOf<Mat>()
     val contours = mutableListOf<MatOfPoint>()
     val hierarchy = Mat()
@@ -63,9 +62,19 @@ private fun extractPatrickNotes(img: Mat): Mat {
     val greaterList = mutableListOf<MatOfPoint>()
     val kernel = getStructuringElement(MORPH_RECT, Size(5.0, 5.0))
 
+    line(img, Point(0.0, 0.0), Point(img.width().toDouble(), 0.0), Scalar(255.0, 255.0, 255.0), 1)
+    line(
+        img,
+        Point(0.0, (img.height() - 1).toDouble()),
+        Point(img.width().toDouble(), (img.height() - 1).toDouble()),
+        Scalar(255.0, 255.0, 255.0),
+        1
+    )
+
     split(img, rgbChannels)
     val weightsBGR = doubleArrayOf(150.0, 110.0, 150.0)
     val addedThresh = computeAddedThresh(rgbChannels, weightsBGR)
+    //saveImage("output/addedThresh.jpg", addedThresh)
 
     findContours(addedThresh, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE)
     for (index in 0 until contours.size) {
@@ -89,6 +98,6 @@ private fun extractPatrickNotes(img: Mat): Mat {
 
     val opening = Mat()
     morphologyEx(addedThresh, opening, MORPH_OPEN, kernel)
-    saveImage("./output/opening.jpg", opening)
+    //saveImage("./output/opening.jpg", opening)
     return opening
 }

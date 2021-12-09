@@ -19,9 +19,9 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.system.exitProcess
 
-private var IMAGES_TO_SKIP = 0
+private var FRAMES_TO_SKIP = 0
 private var INPUT_FPS = 0.0
-private fun fps() = INPUT_FPS / (IMAGES_TO_SKIP + 1)
+private fun fps() = INPUT_FPS / (FRAMES_TO_SKIP + 1)
 private var BPM = 0.0
 private var MIDI_RES = 0.0
 
@@ -32,6 +32,33 @@ private var KEY_START_NUM = -3
 private var KEY_END = 'c'
 private var KEY_END_NUM = 5
 
+// Sheet Music Boss
+private val imageRangeSHB = Pair(0.25, 0.5)
+private val prepareImageSHB: (Mat) -> Mat = { img ->
+    val thresholds = doubleArrayOf(80.0, 85.0, 80.0)
+    val channels = mutableListOf<Mat>()
+    split(img, channels)
+    computeAddedThresh(channels, thresholds)
+}
+private const val maxImageDiffSMB = 0.25
+
+// Patrick Pietschmann
+private val imageRangePP = Pair(0.0, 0.5)
+private val prepareImagePP: (Mat) -> Mat = { img ->
+    val thresh = extractPatrickNotes(img)
+    val start = (thresh.height() * 0.25).toInt()
+    val end = (thresh.height() * 0.75).toInt()
+    thresh.submat(start, end, 0, thresh.width())
+}
+private const val maxImageDiffPP = 0.50
+
+// (Pair<StartPercent, EndPercent>)
+private var FRAME_LIMITS = imageRangePP
+
+// Lambda that modifies an image in a way that it makes it easier to find the notes
+private var prepareImage: (Mat) -> Mat = prepareImagePP
+private var MAX_IMAGE_DIFF = maxImageDiffPP
+
 fun main(args: Array<String>) {
     OpenCV.loadLocally()
     when (args[0]) {
@@ -40,19 +67,19 @@ fun main(args: Array<String>) {
             if (Files.notExists(Path(VIDEO_PATH)))
                 throw FileNotFoundException("Could not find video at '$VIDEO_PATH'")
             INPUT_FPS = args[2].toDouble()
-            IMAGES_TO_SKIP = args[3].toInt()
+            FRAMES_TO_SKIP = args[3].toInt()
             getVideoOffsets()
         }
         "mergeImages" -> {
             VIDEO_PATH = args[1]
             if (Files.notExists(Path(VIDEO_PATH)))
                 throw FileNotFoundException("Could not find video at '$VIDEO_PATH'")
-            IMAGES_TO_SKIP = args[2].toInt()
-            mergeImages()
+            FRAMES_TO_SKIP = args[2].toInt()
+            recMergeImages()
         }
         "longImageToMidi" -> {
             INPUT_FPS = args[1].toDouble()
-            IMAGES_TO_SKIP = args[2].toInt()
+            FRAMES_TO_SKIP = args[2].toInt()
             BPM = args[3].toDouble()
             MIDI_RES = args.getOrNull(4)?.toDouble() ?: 480.0
             longImageToMidi()
@@ -106,7 +133,8 @@ private fun getVideoOffsets() {
     getFrame(cap, frame)
     if (!frame.empty()) {
         var counter = 0
-        oldFrame = frame.submat(0, (frame.height() * 0.75).toInt(), 0, frame.width())
+        oldFrame = prepareImage(frame)
+        oldFrame = oldFrame.submat(0, (oldFrame.height() * 0.75).toInt(), 0, oldFrame.width())
         getFrame(cap, frame)
         while (!frame.empty() && counter < 1_000_000) {
             if (counter % 20 == 0) {
@@ -116,22 +144,18 @@ private fun getVideoOffsets() {
                 System.gc()
             }
 
-            val thresholds = doubleArrayOf(80.0, 85.0, 80.0)
-            val channels1 = mutableListOf<Mat>()
-            val channels2 = mutableListOf<Mat>()
-            split(oldFrame, channels1)
-            split(frame, channels2)
-            val thresh1 = computeAddedThresh(channels1, thresholds)
-            val thresh2 = computeAddedThresh(channels2, thresholds)
             val result = Mat()
-            matchTemplate(thresh1, thresh2, result, TM_SQDIFF)
+            val prepFrame = prepareImage(frame)
+            saveImage("slices/slice$counter.jpg", prepFrame)
+            matchTemplate(oldFrame, prepFrame, result, TM_SQDIFF)
             val mmr = minMaxLoc(result)
             offsets.add(mmr.minLoc.y)
-            //println("$counter minMax: ${mmr.minLoc}")
+            println("$counter minMax: ${mmr.minLoc.y}")
             //saveImage("./output/thresh$counter.jpg", thresh1)
 
-            oldFrame = frame.submat(0, (frame.height() * 0.75).toInt(), 0, frame.width())
-            for (i in 0 until IMAGES_TO_SKIP) {
+            oldFrame =
+                prepFrame.submat(0, (prepFrame.height() * 0.75).toInt(), 0, prepFrame.width())
+            for (i in 0 until FRAMES_TO_SKIP) {
                 getFrame(cap, frame)
             }
             getFrame(cap, frame)
@@ -142,7 +166,7 @@ private fun getVideoOffsets() {
 
     val median = median(offsets)
     val correctedOffsets =
-        offsets.map { value -> if (abs(value - median) > median * 0.25) median else value }
+        offsets.map { value -> if (abs(value - median) > median * MAX_IMAGE_DIFF) median else value }
             .toList()
 
     FileOutputStream("./output/offsetsCorrected.txt").use {
@@ -157,8 +181,41 @@ private fun median(list: List<Double>) = list.sorted().let {
         it[it.size / 2]
 }
 
+private fun recMergeImages() {
+    val offsets = FileInputStream("output/offsetsCorrected.txt").use {
+        it.readAllBytes().decodeToString().splitToSequence(", ").map { elem -> elem.toDouble() }
+            .toList()
+    }
+    val cap = VideoCapture(VIDEO_PATH)
+    val frames = mutableListOf<Mat>()
+    val startFrame = Mat()
+    cap.read(startFrame)
+    frames.add(startFrame)
+    val small = Mat()
+    // save first image
+    for ((counter, offset) in offsets.withIndex()) {
+        cap.read(small)
+        val cut = small.submat(0, offset.plus(1).roundToInt(), 0, small.width())
+        frames.add(cut)
+        println("added frame $counter")
+        for (i in 0 until FRAMES_TO_SKIP) {
+            getFrame(cap, small)
+        }
+        if (counter % 100 == 0) {
+            System.gc()
+        }
+    }
+
+    frames.reverse()
+
+    val fullImage = Mat()
+    println("now concat images")
+    vconcat(frames, fullImage)
+    saveImage("output/appended.bmp", fullImage)
+}
+
 private fun mergeImages() {
-    val offsets = FileInputStream("./output/offsetsCorrected.txt").use {
+    val offsets = FileInputStream("output/offsetsCorrected.txt").use {
         it.readAllBytes().decodeToString().splitToSequence(", ").map { elem -> elem.toDouble() }
             .toList()
     }
@@ -169,12 +226,12 @@ private fun mergeImages() {
     Mat(bigFrame, Range((bigFrame.height() * 0.25).toInt(), bigFrame.height())).copyTo(bigFrame)
     getFrame(cap, frame)
     var counter = 0
-    while (!frame.empty() && counter < offsets.size) {
+    while (!frame.empty() && counter < 200) {
         println("merge image #$counter")
         val cut = frame.submat(0, offsets[counter].plus(1).roundToInt(), 0, frame.width())
         vconcat(mutableListOf(cut, bigFrame), bigFrame)
 
-        for (i in 0 until IMAGES_TO_SKIP) {
+        for (i in 0 until FRAMES_TO_SKIP) {
             getFrame(cap, frame)
         }
         getFrame(cap, frame)
@@ -184,16 +241,22 @@ private fun mergeImages() {
         }
     }
     cap.release()
-    saveImage("./output/appended.bmp", bigFrame)
+    saveImage("output/appended.bmp", bigFrame)
 }
 
+/**
+ * Gets the next frame from the given VideoCapture and cuts it to the given
+ * limits
+ * @param cap The VideoCapture to take the frame from.
+ * @param frame The Mat to fill.
+ */
 private fun getFrame(cap: VideoCapture, frame: Mat) {
     cap.read(frame)
-    if (!frame.empty())
-        Mat(
-            frame,
-            Range((frame.height() * 0.25).toInt(), (frame.height() * 0.50).toInt())
-        ).copyTo(frame)
+    if (!frame.empty()) {
+        val start = (frame.height() * FRAME_LIMITS.first).toInt()
+        val end = (frame.height() * FRAME_LIMITS.second).toInt()
+        Mat(frame, Range(start, end)).copyTo(frame)
+    }
 }
 
 private fun initKeys(
@@ -442,7 +505,6 @@ fun makeEvent(command: Int, channel: Int, note: Int, velocity: Int, tick: Int): 
 
     return MidiEvent(a, tick.toLong())
 }
-
 
 fun loadImage(imagePath: String): Mat {
     return Imgcodecs.imread(imagePath)
