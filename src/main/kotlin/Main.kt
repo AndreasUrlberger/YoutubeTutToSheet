@@ -9,7 +9,9 @@ import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.nio.file.Files
+import javax.sound.midi.MidiEvent
 import javax.sound.midi.MidiSystem
+import javax.sound.midi.ShortMessage
 import javax.sound.midi.ShortMessage.NOTE_OFF
 import javax.sound.midi.ShortMessage.NOTE_ON
 import kotlin.io.path.Path
@@ -19,7 +21,7 @@ import kotlin.system.exitProcess
 
 private var IMAGES_TO_SKIP = 0
 private var INPUT_FPS = 0.0
-private fun FPS() = INPUT_FPS / (IMAGES_TO_SKIP + 1)
+private fun fps() = INPUT_FPS / (IMAGES_TO_SKIP + 1)
 private var BPM = 0.0
 private var MIDI_RES = 0.0
 
@@ -61,7 +63,7 @@ fun main(args: Array<String>) {
 }
 
 private fun longImageToMidi() {
-    val img = loadImage("./input/longImage.bmp") ?: throw FileNotFoundException()
+    val img = loadImage("./input/longImage.bmp")
     if (img.empty())
         throw IllegalArgumentException("Image is empty")
     val offsets = FileInputStream("./output/offsetsCorrected.txt").use {
@@ -89,7 +91,7 @@ private fun longImageToMidi() {
 
     // create midi
     val bps = BPM / 60.0
-    val pxPerSec = offsets.average() * FPS()
+    val pxPerSec = offsets.average() * fps()
     println("pixel per second $pxPerSec")
     val pxPerBeat = pxPerSec / bps
     val playSpeed = (pxPerBeat / MIDI_RES)
@@ -400,7 +402,7 @@ private fun getHand(colors: DoubleArray): Int {
     }
 }
 
-private fun findExtrema(elem: MatOfPoint): Pair<Pair<Double, Double>, Pair<Double, Double>> {
+fun findExtrema(elem: MatOfPoint): Pair<Pair<Double, Double>, Pair<Double, Double>> {
     val bottom = elem.toArray().maxOf { point -> point.y }
     val top = elem.toArray().minOf { point -> point.y }
     val left = elem.toArray().minOf { point -> point.x }
@@ -408,7 +410,7 @@ private fun findExtrema(elem: MatOfPoint): Pair<Pair<Double, Double>, Pair<Doubl
     return Pair(Pair(top, bottom), Pair(left, right))
 }
 
-private fun computeAddedThresh(channels: MutableList<Mat>, weights: DoubleArray): Mat {
+fun computeAddedThresh(channels: MutableList<Mat>, weights: DoubleArray): Mat {
     if (weights.size < 3) {
         throw IllegalArgumentException("size of weights must be exactly 3")
     }
@@ -428,11 +430,26 @@ private fun computeAddedThresh(channels: MutableList<Mat>, weights: DoubleArray)
     return addedThresh
 }
 
-private fun loadImage(imagePath: String): Mat? {
-    return Imgcodecs.imread(imagePath)
+fun makeEvent(command: Int, channel: Int, note: Int, velocity: Int, tick: Int): MidiEvent {
+
+    // ShortMessage stores a note as command type, channel,
+    // instrument it has to be played on and its speed.
+    val a = ShortMessage()
+    a.setMessage(command, channel, note, velocity)
+
+    // A midi event consists of a short message(representing
+    // a note) and the tick at which that note has to be played
+
+    return MidiEvent(a, tick.toLong())
 }
 
-private fun saveImage(path: String, image: Mat) {
+
+fun loadImage(imagePath: String): Mat {
+    return Imgcodecs.imread(imagePath)
+        ?: throw IllegalArgumentException("Could not find image at path '$imagePath'")
+}
+
+fun saveImage(path: String, image: Mat) {
     Imgcodecs.imwrite(path, image)
 }
 
