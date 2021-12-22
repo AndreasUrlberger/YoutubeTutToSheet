@@ -40,6 +40,12 @@ private val prepareImageSHB: (Mat) -> Mat = { img ->
     split(img, channels)
     computeAddedThresh(channels, thresholds)
 }
+private val extractNotesSMB: (Mat) -> Mat = { img ->
+    val thresholds = doubleArrayOf(80.0, 85.0, 80.0)
+    val slices = mutableListOf<Mat>()
+    split(img, slices)
+    computeAddedThresh(slices, thresholds)
+}
 private const val maxImageDiffSMB = 0.25
 
 // Patrick Pietschmann
@@ -50,6 +56,7 @@ private val prepareImagePP: (Mat) -> Mat = { img ->
     val end = (thresh.height() * 0.75).toInt()
     thresh.submat(start, end, 0, thresh.width())
 }
+private val extractNotesPP: (Mat) -> Mat = ::extractPatrickNotes
 private const val maxImageDiffPP = 0.50
 
 // (Pair<StartPercent, EndPercent>)
@@ -57,6 +64,7 @@ private var FRAME_LIMITS = imageRangePP
 
 // Lambda that modifies an image in a way that it makes it easier to find the notes
 private var prepareImage: (Mat) -> Mat = prepareImagePP
+private var extractNotes: (Mat) -> Mat = extractNotesPP
 private var MAX_IMAGE_DIFF = maxImageDiffPP
 
 fun main(args: Array<String>) {
@@ -111,7 +119,7 @@ private fun longImageToMidi() {
         )
     }.toList()
     val notes = mutableListOf<KeyEvent>()
-    detectNotesInImage(img, keyBorders, notes)
+    detectNotesInImagePP(img, keyBorders, notes)
 
     // create Timeline
     val shiftedTimeline = shiftTimelineToStart(notes)
@@ -146,7 +154,7 @@ private fun getVideoOffsets() {
 
             val result = Mat()
             val prepFrame = prepareImage(frame)
-            saveImage("slices/slice$counter.jpg", prepFrame)
+            //saveImage("slices/slice$counter.jpg", prepFrame)
             matchTemplate(oldFrame, prepFrame, result, TM_SQDIFF)
             val mmr = minMaxLoc(result)
             offsets.add(mmr.minLoc.y)
@@ -259,13 +267,13 @@ private fun getFrame(cap: VideoCapture, frame: Mat) {
     }
 }
 
-private fun initKeys(
+fun initKeys(
     outKeys: MutableList<Pair<Double, Double>>
 ): Pair<Int, Double> {
     val keyCodes = mapOf('a' to 9, 'h' to 11, 'c' to 0, 'd' to 2, 'e' to 4, 'f' to 5, 'g' to 7)
     checkBorderKeys(KEY_START_NUM, KEY_END_NUM, KEY_START, KEY_END)
 
-    val keyDimensions = listOf(
+    val realKeyDimensions = listOf(
         // (left position relative to the start of last octave, width of the key, isWhiteKey)
         Triple(0.0, 0.9, true), // c
         // (left position relative to end of last white key, same for the right position, isWhiteKey)
@@ -281,6 +289,25 @@ private fun initKeys(
         Triple(-0.1, 0.4, false), // ais
         Triple(5.55, 0.95, true), // h
     )
+
+    val simpleKeyDimensions = listOf(
+        // (left position relative to the start of last octave, width of the key, isWhiteKey)
+        Triple(0.0, 1 / 7.0, true), // c
+        // (left position relative to end of last white key, same for the right position, isWhiteKey)
+        Triple(-0.35 / 6.5, 0.15 / 6.5, false), // cis
+        Triple(1 / 7.0, 1 / 7.0, true), // d
+        Triple(-0.15 / 6.5, 0.35 / 6.5, false), // dis
+        Triple(2 / 7.0, 1 / 7.0, true), // e
+        Triple(3 / 7.0, 1 / 7.0, true), // f
+        Triple(-0.4 / 6.5, 0.1 / 6.5, false), // fis
+        Triple(4 / 7.0, 1 / 7.0, true), // g
+        Triple(-0.25 / 6.5, 0.25 / 6.5, false), // gis
+        Triple(5 / 7.0, 1 / 7.0, true), // a
+        Triple(-0.1 / 6.5, 0.4 / 6.5, false), // ais
+        Triple(6 / 7.0, 1 / 7.0, true), // h
+    ).map { Triple(it.first.times(6.5), it.second.times(6.5), it.third) }
+
+    val keyDimensions = simpleKeyDimensions
 
     var whiteKeys = 0
     var xOffset = 0.0
@@ -437,7 +464,7 @@ private fun detectNotesInImage(
                             img,
                             Point(border.first - sliceWidth * 0.2 + left, top - 1),
                             Point(border.first - sliceWidth * 0.2 + right, bottom + 1),
-                            Scalar(0.0, 0.0, 255.0),
+                            Scalar(0.0, 255.0, 0.0),
                             3
                         )
                         // Get correct hand
@@ -449,6 +476,55 @@ private fun detectNotesInImage(
                         notes.add(KeyEvent(img.height() - (bottom + 1), keyIndex, true, hand))
                         notes.add(KeyEvent(img.height() - (top - 1), keyIndex, false, hand))
                     }
+                }
+            }
+        }
+    }
+    saveImage("./slices/slice.bmp", img)
+}
+
+private fun detectNotesInImagePP(
+    img: Mat,
+    keyBorders: List<Pair<Double, Double>>,
+    notes: MutableList<KeyEvent>,
+) {
+    keyBorders.forEachIndexed { keyIndex, border ->
+        val sliceWidth = (border.second - border.first)
+        val widthThreshold = sliceWidth * 0.55
+        val borderStart =
+            (border.first - sliceWidth * 0.2).roundToInt().coerceIn(0, img.width())
+        val borderEnd = (border.second + sliceWidth * 0.2).roundToInt().coerceIn(0, img.width())
+        val slice = img.submat(0, img.height(), borderStart, borderEnd)
+        saveImage("slices/slice${keyIndex}s.jpg", slice)
+        val prepImage = extractNotes(slice)
+        saveImage("slices/slice$keyIndex.jpg", prepImage)
+
+        val contours = mutableListOf<MatOfPoint>()
+        val hierarchy = Mat()
+        findContours(prepImage, contours, hierarchy, RETR_LIST, CHAIN_APPROX_SIMPLE)
+        for (x in 0 until hierarchy.width()) {
+            for (y in 0 until hierarchy.height()) {
+                // entry = (next, previous, firstChild, parent)
+                val entry = hierarchy.get(y, x)
+                val (vertical, horizontal) = findExtrema(contours[x])
+                val (top, bottom) = vertical
+                val (left, right) = horizontal
+                if (right - left >= widthThreshold) {
+                    rectangle(
+                        img,
+                        Point(border.first - sliceWidth * 0.2 + left, top - 1),
+                        Point(border.first - sliceWidth * 0.2 + right, bottom + 1),
+                        Scalar(0.0, 255.0, 0.0),
+                        3
+                    )
+                    // Get correct hand
+                    val middleX = ((bottom + top) / 2).toInt()
+                    val middleY = ((left + right) / 2 + border.first - sliceWidth * 0.2).toInt()
+                    val hand = getHand(img.get(middleX, middleY))
+
+                    // We only look at inner contours, so it is safe to extend them by one
+                    notes.add(KeyEvent(img.height() - (bottom + 1), keyIndex, true, hand))
+                    notes.add(KeyEvent(img.height() - (top - 1), keyIndex, false, hand))
                 }
             }
         }
