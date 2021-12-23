@@ -5,7 +5,6 @@ import org.opencv.imgproc.Imgproc.*
 import java.io.FileNotFoundException
 import java.nio.file.Files
 import kotlin.io.path.Path
-import kotlin.math.pow
 
 fun main(args: Array<String>) {
     if (args.isEmpty())
@@ -30,36 +29,18 @@ private fun renderLines(img: Mat) {
         )
     }.toList()
 
-    //val line = readLine()!!
-    //val k = line.toDouble()
-    val k = 0.043
     val top = (img.height() - 1).toDouble()
     val widthWhite = keyBorders.maxOf { it.second - it.first }
-    val width = keyBorders.maxOf { it.second }
-    val distortionMiddle = 0.47
-    println("width: $width")
-    keyBorders.forEach { (left, right) ->
-        if ((right - left) > widthWhite * 0.8) {
-            val aLeft = distort(left, distortionMiddle, width, k)
-            val aRight = distort(right, distortionMiddle, width, k)
-            rectangle(img, Point(aLeft, 0.0), Point(aRight, top), Scalar(0.0, 255.0, 0.0), 1)
+    val keyBordersTuned = tuneKeyBorders(keyBorders)
+    keyBordersTuned.forEach { (left, right) ->
+        if ((right - left) < widthWhite * 0.8) {
+            rectangle(img, Point(left, 0.0), Point(right, top), Scalar(0.0, 255.0, 0.0), 1)
         }
     }
 
     saveImage("output/lines.jpg", img)
 
     println("render Lines")
-}
-
-private fun distort(pos: Double, distortionOrigin: Double, width: Double, k: Double): Double {
-    val x = pos / width
-    val middle = distortionOrigin
-    val left = (middle).pow(3) * k
-    val right = (1 - middle).pow(3) * k
-    val newLength = 1 - (left + right)
-    val distance = (x - middle)
-    val offset = (distance).pow(3) * k
-    return (x - offset - left) / (newLength / width)
 }
 
 private fun videoSetup(img: Mat) {

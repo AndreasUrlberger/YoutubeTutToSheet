@@ -16,6 +16,7 @@ import javax.sound.midi.ShortMessage.NOTE_OFF
 import javax.sound.midi.ShortMessage.NOTE_ON
 import kotlin.io.path.Path
 import kotlin.math.abs
+import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.system.exitProcess
 
@@ -32,6 +33,41 @@ private var KEY_START_NUM = -3
 private var KEY_END = 'c'
 private var KEY_END_NUM = 5
 
+private val realKeyDimensions = listOf(
+    // (left position relative to the start of last octave, width of the key, isWhiteKey)
+    Triple(0.0, 0.9, true), // c
+    // (left position relative to end of last white key, same for the right position, isWhiteKey)
+    Triple(-0.35, 0.15, false), // cis
+    Triple(0.9, 0.9, true), // d
+    Triple(-0.15, 0.35, false), // dis
+    Triple(1.8, 0.9, true), // e
+    Triple(2.7, 0.95, true), // f
+    Triple(-0.4, 0.1, false), // fis
+    Triple(3.65, 0.95, true), // g
+    Triple(-0.25, 0.25, false), // gis
+    Triple(4.6, 0.95, true), // a
+    Triple(-0.1, 0.4, false), // ais
+    Triple(5.55, 0.95, true), // h
+)
+
+private val simpleKeyDimensions = listOf(
+    // (left position relative to the start of last octave, width of the key, isWhiteKey)
+    Triple(0.0, 1 / 7.0, true), // c
+    // (left position relative to end of last white key, same for the right position, isWhiteKey)
+    Triple(-0.35 / 6.5, 0.15 / 6.5, false), // cis
+    Triple(1 / 7.0, 1 / 7.0, true), // d
+    Triple(-0.15 / 6.5, 0.35 / 6.5, false), // dis
+    Triple(2 / 7.0, 1 / 7.0, true), // e
+    Triple(3 / 7.0, 1 / 7.0, true), // f
+    Triple(-0.4 / 6.5, 0.1 / 6.5, false), // fis
+    Triple(4 / 7.0, 1 / 7.0, true), // g
+    Triple(-0.25 / 6.5, 0.25 / 6.5, false), // gis
+    Triple(5 / 7.0, 1 / 7.0, true), // a
+    Triple(-0.1 / 6.5, 0.4 / 6.5, false), // ais
+    Triple(6 / 7.0, 1 / 7.0, true), // h
+).map { Triple(it.first.times(6.5), it.second.times(6.5), it.third) }
+
+
 // Sheet Music Boss
 private val imageRangeSHB = Pair(0.25, 0.5)
 private val prepareImageSHB: (Mat) -> Mat = { img ->
@@ -47,6 +83,8 @@ private val extractNotesSMB: (Mat) -> Mat = { img ->
     computeAddedThresh(slices, thresholds)
 }
 private const val maxImageDiffSMB = 0.25
+private const val keyboardDistOriginSMB = 0.47
+private const val keyboardDistCoeffSMB = 0.043
 
 // Patrick Pietschmann
 private val imageRangePP = Pair(0.0, 0.5)
@@ -58,6 +96,8 @@ private val prepareImagePP: (Mat) -> Mat = { img ->
 }
 private val extractNotesPP: (Mat) -> Mat = ::extractPatrickNotes
 private const val maxImageDiffPP = 0.50
+private const val keyboardDistOriginPP = 0.47
+private const val keyboardDistCoeffPP = 0.043
 
 // (Pair<StartPercent, EndPercent>)
 private var FRAME_LIMITS = imageRangePP
@@ -65,7 +105,11 @@ private var FRAME_LIMITS = imageRangePP
 // Lambda that modifies an image in a way that it makes it easier to find the notes
 private var prepareImage: (Mat) -> Mat = prepareImagePP
 private var extractNotes: (Mat) -> Mat = extractNotesPP
+
 private var MAX_IMAGE_DIFF = maxImageDiffPP
+private var KEYBOARD_DIST_COEFF = keyboardDistCoeffPP
+private var KEYBOARD_DIST_ORIGIN = keyboardDistOriginPP
+private var KEY_DIMENSIONS = simpleKeyDimensions
 
 fun main(args: Array<String>) {
     OpenCV.loadLocally()
@@ -112,7 +156,8 @@ private fun longImageToMidi() {
     val keys = mutableListOf<Pair<Double, Double>>()
     val (_, keyboardWidth) = initKeys(keys)
     val pixelsPerInch = img.width() / keyboardWidth
-    val keyBorders = keys.asSequence().map { old ->
+    val tunedKeyBorders = tuneKeyBorders(keys)
+    val keyBorders = tunedKeyBorders.asSequence().map { old ->
         Pair(
             old.first * pixelsPerInch,
             ((old.second * pixelsPerInch).coerceAtMost(img.width().toDouble()))
@@ -273,48 +318,12 @@ fun initKeys(
     val keyCodes = mapOf('a' to 9, 'h' to 11, 'c' to 0, 'd' to 2, 'e' to 4, 'f' to 5, 'g' to 7)
     checkBorderKeys(KEY_START_NUM, KEY_END_NUM, KEY_START, KEY_END)
 
-    val realKeyDimensions = listOf(
-        // (left position relative to the start of last octave, width of the key, isWhiteKey)
-        Triple(0.0, 0.9, true), // c
-        // (left position relative to end of last white key, same for the right position, isWhiteKey)
-        Triple(-0.35, 0.15, false), // cis
-        Triple(0.9, 0.9, true), // d
-        Triple(-0.15, 0.35, false), // dis
-        Triple(1.8, 0.9, true), // e
-        Triple(2.7, 0.95, true), // f
-        Triple(-0.4, 0.1, false), // fis
-        Triple(3.65, 0.95, true), // g
-        Triple(-0.25, 0.25, false), // gis
-        Triple(4.6, 0.95, true), // a
-        Triple(-0.1, 0.4, false), // ais
-        Triple(5.55, 0.95, true), // h
-    )
-
-    val simpleKeyDimensions = listOf(
-        // (left position relative to the start of last octave, width of the key, isWhiteKey)
-        Triple(0.0, 1 / 7.0, true), // c
-        // (left position relative to end of last white key, same for the right position, isWhiteKey)
-        Triple(-0.35 / 6.5, 0.15 / 6.5, false), // cis
-        Triple(1 / 7.0, 1 / 7.0, true), // d
-        Triple(-0.15 / 6.5, 0.35 / 6.5, false), // dis
-        Triple(2 / 7.0, 1 / 7.0, true), // e
-        Triple(3 / 7.0, 1 / 7.0, true), // f
-        Triple(-0.4 / 6.5, 0.1 / 6.5, false), // fis
-        Triple(4 / 7.0, 1 / 7.0, true), // g
-        Triple(-0.25 / 6.5, 0.25 / 6.5, false), // gis
-        Triple(5 / 7.0, 1 / 7.0, true), // a
-        Triple(-0.1 / 6.5, 0.4 / 6.5, false), // ais
-        Triple(6 / 7.0, 1 / 7.0, true), // h
-    ).map { Triple(it.first.times(6.5), it.second.times(6.5), it.third) }
-
-    val keyDimensions = simpleKeyDimensions
-
     var whiteKeys = 0
     var xOffset = 0.0
     var width = 0.0
     // lower single keys
     for (key in (keyCodes[KEY_START] ?: 0)..(keyCodes.values.maxOrNull() ?: 0)) {
-        val dim = keyDimensions[key]
+        val dim = KEY_DIMENSIONS[key]
         if (dim.third) { // white key
             outKeys.add(Pair(xOffset, xOffset + dim.second))
             xOffset += dim.second
@@ -326,8 +335,8 @@ fun initKeys(
     }
     // octave keys
     for (scale in (KEY_START_NUM + 1) until KEY_END_NUM) {
-        for (key in keyDimensions.indices) {
-            val dim = keyDimensions[key]
+        for (key in KEY_DIMENSIONS.indices) {
+            val dim = KEY_DIMENSIONS[key]
             if (dim.third) { // white key
                 outKeys.add(Pair(xOffset, xOffset + dim.second))
                 xOffset += dim.second
@@ -340,7 +349,7 @@ fun initKeys(
     }
     // upper single keys
     for (key in (keyCodes.values.minOrNull() ?: 0)..(keyCodes[KEY_END] ?: 0)) {
-        val dim = keyDimensions[key]
+        val dim = KEY_DIMENSIONS[key]
         if (dim.third) { // white key
             outKeys.add(Pair(xOffset, xOffset + dim.second))
             xOffset += dim.second
@@ -352,6 +361,25 @@ fun initKeys(
     }
 
     return Pair(whiteKeys, width)
+}
+
+fun tuneKeyBorders(borders: List<Pair<Double, Double>>): List<Pair<Double, Double>> {
+    val width = borders.maxOf { it.second }
+    return borders.map { (left, right) ->
+        val aLeft = distort(left, KEYBOARD_DIST_ORIGIN, width, KEYBOARD_DIST_COEFF)
+        val aRight = distort(right, KEYBOARD_DIST_ORIGIN, width, KEYBOARD_DIST_COEFF)
+        Pair(aLeft, aRight)
+    }
+}
+
+fun distort(pos: Double, distortionOrigin: Double, width: Double, k: Double): Double {
+    val x = pos / width
+    val left = (distortionOrigin).pow(3) * k
+    val right = (1 - distortionOrigin).pow(3) * k
+    val newLength = 1 - (left + right)
+    val distance = (x - distortionOrigin)
+    val offset = (distance).pow(3) * k
+    return (x - offset - left) / (newLength / width)
 }
 
 private fun checkBorderKeys(lowNum: Int, highNum: Int, keyLow: Char, keyHigh: Char) {
@@ -394,7 +422,8 @@ private fun createMidi(timeline: List<KeyEvent>, playSpeed: Double) {
         track.add(
             makeEvent(
                 if (event.type) NOTE_ON else NOTE_OFF,
-                event.hand,
+                //event.hand,
+                0,
                 event.key + baseNote,
                 100,
                 event.pos.div(playSpeed).roundToInt()
@@ -488,12 +517,14 @@ private fun detectNotesInImagePP(
     keyBorders: List<Pair<Double, Double>>,
     notes: MutableList<KeyEvent>,
 ) {
+    // TODO: apply filtering to whole Image and only then slice it
     keyBorders.forEachIndexed { keyIndex, border ->
+        val bonusPx = 3
         val sliceWidth = (border.second - border.first)
         val widthThreshold = sliceWidth * 0.55
         val borderStart =
-            (border.first - sliceWidth * 0.2).roundToInt().coerceIn(0, img.width())
-        val borderEnd = (border.second + sliceWidth * 0.2).roundToInt().coerceIn(0, img.width())
+            (border.first - bonusPx).roundToInt().coerceIn(0, img.width())
+        val borderEnd = (border.second + bonusPx).roundToInt().coerceIn(0, img.width())
         val slice = img.submat(0, img.height(), borderStart, borderEnd)
         saveImage("slices/slice${keyIndex}s.jpg", slice)
         val prepImage = extractNotes(slice)
@@ -507,29 +538,68 @@ private fun detectNotesInImagePP(
                 // entry = (next, previous, firstChild, parent)
                 val entry = hierarchy.get(y, x)
                 val (vertical, horizontal) = findExtrema(contours[x])
-                val (top, bottom) = vertical
                 val (left, right) = horizontal
                 if (right - left >= widthThreshold) {
-                    rectangle(
+                    val (realTop, realBottom) = getMiddleHeight(prepImage, left, right, vertical)
+                    println("difference top: ${vertical.first - realTop} bottom: ${vertical.second - realBottom}")
+                    //val (realTop, realBottom) = vertical
+                    /*rectangle(
                         img,
-                        Point(border.first - sliceWidth * 0.2 + left, top - 1),
-                        Point(border.first - sliceWidth * 0.2 + right, bottom + 1),
+                        Point(border.first - bonusPx + left, realTop - 1),
+                        Point(border.first - bonusPx + right, realBottom + 1),
                         Scalar(0.0, 255.0, 0.0),
                         3
-                    )
+                    )*/
+                    // val contour = MatOfPoint(*contours[x].toArray().map { Point(border.first + it.x - bonusPx, it.y) }.toTypedArray())
+                    // drawContours(img, listOf(contour), -1, Scalar(Random.nextDouble(255.0), Random.nextDouble(255.0), Random.nextDouble(255.0)))
                     // Get correct hand
-                    val middleX = ((bottom + top) / 2).toInt()
-                    val middleY = ((left + right) / 2 + border.first - sliceWidth * 0.2).toInt()
+                    val middleX = ((realBottom + realTop) / 2).toInt()
+                    val middleY = ((left + right) / 2 + border.first - bonusPx).toInt()
                     val hand = getHand(img.get(middleX, middleY))
 
                     // We only look at inner contours, so it is safe to extend them by one
-                    notes.add(KeyEvent(img.height() - (bottom + 1), keyIndex, true, hand))
-                    notes.add(KeyEvent(img.height() - (top - 1), keyIndex, false, hand))
+                    notes.add(KeyEvent(img.height() - (realBottom + 1), keyIndex, true, hand))
+                    notes.add(KeyEvent(img.height() - (realTop - 1), keyIndex, false, hand))
                 }
             }
         }
     }
     saveImage("./slices/slice.bmp", img)
+}
+
+fun getMiddleHeight(
+    img: Mat,
+    left: Double,
+    right: Double,
+    vertical: Pair<Double, Double>
+): Pair<Double, Double> {
+    val (top, bottom) = vertical
+    //println("top $top, bottom $bottom")
+    val xOI = ((left + right) / 2).roundToInt()
+    var realTop = 0
+    for (index in top.roundToInt()..bottom.roundToInt()) {
+        if (img[index, xOI].sum() > 0.5) {
+            realTop = index
+            break
+        }
+    }
+    var realBottom = 0
+    for (index in bottom.roundToInt() downTo top.roundToInt()) {
+        if (img[index, xOI].sum() > 0.5) {
+            realBottom = index
+            break
+        }
+    }
+    //println("realTop $realTop, realBottom $realBottom")
+    return Pair(realTop.toDouble(), realBottom.toDouble())
+}
+
+fun findExtrema(elem: MatOfPoint): Pair<Pair<Double, Double>, Pair<Double, Double>> {
+    val bottom = elem.toArray().maxOf { it.y }
+    val top = elem.toArray().minOf { it.y }
+    val left = elem.toArray().minOf { it.x }
+    val right = elem.toArray().maxOf { it.x }
+    return Pair(Pair(top, bottom), Pair(left, right))
 }
 
 private fun getHand(colors: DoubleArray): Int {
@@ -539,14 +609,6 @@ private fun getHand(colors: DoubleArray): Int {
     } else {
         0
     }
-}
-
-fun findExtrema(elem: MatOfPoint): Pair<Pair<Double, Double>, Pair<Double, Double>> {
-    val bottom = elem.toArray().maxOf { point -> point.y }
-    val top = elem.toArray().minOf { point -> point.y }
-    val left = elem.toArray().minOf { point -> point.x }
-    val right = elem.toArray().maxOf { point -> point.x }
-    return Pair(Pair(top, bottom), Pair(left, right))
 }
 
 fun computeAddedThresh(channels: MutableList<Mat>, weights: DoubleArray): Mat {
