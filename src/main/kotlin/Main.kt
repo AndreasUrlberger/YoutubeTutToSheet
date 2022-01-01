@@ -243,11 +243,13 @@ private fun recMergeImages() {
     val frames = mutableListOf<Mat>()
     val startFrame = Mat()
     cap.read(startFrame)
+    adaptThresh(startFrame, 5.0).copyTo(startFrame)
     frames.add(startFrame)
     val small = Mat()
     // save first image
     for ((counter, offset) in offsets.withIndex()) {
         cap.read(small)
+        adaptThresh(small, 5.0).copyTo(small)
         val cut = small.submat(0, offset.plus(1).roundToInt(), 0, small.width())
         frames.add(cut)
         println("added frame $counter")
@@ -265,6 +267,16 @@ private fun recMergeImages() {
     println("now concat images")
     vconcat(frames, fullImage)
     saveImage("output/appended.bmp", fullImage)
+}
+
+fun adaptThresh(img: Mat, C: Double): Mat {
+    val channels = mutableListOf<Mat>()
+    split(img, channels)
+
+    val adaptThresh = Mat()
+    // BORDER_REPLICATE | #BORDER_ISOLATED
+    adaptiveThreshold(channels[1], adaptThresh, 255.0, BORDER_REPLICATE, THRESH_BINARY_INV, 5, C)
+    return adaptThresh
 }
 
 private fun mergeImages() {
@@ -518,21 +530,21 @@ private fun detectNotesInImagePP(
     notes: MutableList<KeyEvent>,
 ) {
     // TODO: apply filtering to whole Image and only then slice it
+    val prepImage = extractNotes(img)
+    saveImage("slices/sliceP.jpg", prepImage)
     keyBorders.forEachIndexed { keyIndex, border ->
         val bonusPx = 3
         val sliceWidth = (border.second - border.first)
         val widthThreshold = sliceWidth * 0.55
         val borderStart =
-            (border.first - bonusPx).roundToInt().coerceIn(0, img.width())
-        val borderEnd = (border.second + bonusPx).roundToInt().coerceIn(0, img.width())
-        val slice = img.submat(0, img.height(), borderStart, borderEnd)
+            (border.first - bonusPx).roundToInt().coerceIn(0, prepImage.width())
+        val borderEnd = (border.second + bonusPx).roundToInt().coerceIn(0, prepImage.width())
+        val slice = prepImage.submat(0, prepImage.height(), borderStart, borderEnd)
         saveImage("slices/slice${keyIndex}s.jpg", slice)
-        val prepImage = extractNotes(slice)
-        saveImage("slices/slice$keyIndex.jpg", prepImage)
 
         val contours = mutableListOf<MatOfPoint>()
         val hierarchy = Mat()
-        findContours(prepImage, contours, hierarchy, RETR_LIST, CHAIN_APPROX_SIMPLE)
+        findContours(slice, contours, hierarchy, RETR_LIST, CHAIN_APPROX_SIMPLE)
         for (x in 0 until hierarchy.width()) {
             for (y in 0 until hierarchy.height()) {
                 // entry = (next, previous, firstChild, parent)
@@ -540,8 +552,8 @@ private fun detectNotesInImagePP(
                 val (vertical, horizontal) = findExtrema(contours[x])
                 val (left, right) = horizontal
                 if (right - left >= widthThreshold) {
-                    val (realTop, realBottom) = getMiddleHeight(prepImage, left, right, vertical)
-                    println("difference top: ${vertical.first - realTop} bottom: ${vertical.second - realBottom}")
+                    val (realTop, realBottom) = getMiddleHeight(slice, left, right, vertical)
+                    //println("difference top: ${vertical.first - realTop} bottom: ${vertical.second - realBottom}")
                     //val (realTop, realBottom) = vertical
                     /*rectangle(
                         img,

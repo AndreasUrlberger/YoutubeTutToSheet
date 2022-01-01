@@ -5,6 +5,7 @@ import org.opencv.imgproc.Imgproc.*
 import java.io.FileNotFoundException
 import java.nio.file.Files
 import kotlin.io.path.Path
+import kotlin.math.roundToInt
 
 fun main(args: Array<String>) {
     if (args.isEmpty())
@@ -15,7 +16,7 @@ fun main(args: Array<String>) {
     OpenCV.loadLocally()
     var big = loadImage(args[0])
     //big = big.submat(0, (big.height() * 0.5).toInt(), 0, big.width())
-    renderLines(big)
+    detectTest(big)
 }
 
 private fun renderLines(img: Mat) {
@@ -33,7 +34,7 @@ private fun renderLines(img: Mat) {
     val widthWhite = keyBorders.maxOf { it.second - it.first }
     val keyBordersTuned = tuneKeyBorders(keyBorders)
     keyBordersTuned.forEach { (left, right) ->
-        if ((right - left) < widthWhite * 0.8) {
+        if ((right - left) > widthWhite * 0.8) {
             rectangle(img, Point(left, 0.0), Point(right, top), Scalar(0.0, 255.0, 0.0), 1)
         }
     }
@@ -67,12 +68,99 @@ private fun videoSetup(img: Mat) {
     val addedThresh = computeAddedThresh(rgbChannels, doubleArrayOf(blue, green, red))
     saveImage("./output/addedThresh.jpg", addedThresh)
 
+    // adaptive
+    val adaptThresh0 = adaptThresh(rgbChannels[0], 5.0)
+    val adaptThresh1 = adaptThresh(rgbChannels[1], 5.0)
+    val adaptThresh2 = adaptThresh(rgbChannels[2], 5.0)
+    saveImage("output/adaptThreshBlue.jpg", adaptThresh0)
+    saveImage("output/adaptThreshGreen.jpg", adaptThresh1)
+    saveImage("output/adaptThreshRed.jpg", adaptThresh2)
+
+    val addedAdaptThresh = Mat()
+    Core.bitwise_and(adaptThresh0, adaptThresh1, addedAdaptThresh)
+    Core.bitwise_and(addedThresh, adaptThresh2, addedAdaptThresh)
+    saveImage("output/adaptThreshComb.jpg", addedAdaptThresh)
+
     val edges = Mat()
     Canny(img, edges, 230.0, 255.0)
     saveImage("./output/canny.jpg", edges)
 
     saveImage("./output/img.jpg", img)
     saveImage("./output/addedThreshCleared.jpg", addedThresh)
+}
+
+private fun detectTest(img: Mat) {
+    cvtColor(img, img, COLOR_BGR2GRAY)
+    saveImage("output/test.jpg", img)
+    val keys = mutableListOf<Pair<Double, Double>>()
+    val (_, keyboardWidth) = initKeys(keys)
+    val pixelsPerInch = img.width() / keyboardWidth
+    val tunedKeyBorders = tuneKeyBorders(keys)
+    val keyBorders = tunedKeyBorders.asSequence().map { old ->
+        Pair(
+            old.first * pixelsPerInch,
+            ((old.second * pixelsPerInch).coerceAtMost(img.width().toDouble()))
+        )
+    }.toList()
+
+    // TODO: maybe improve by making the combined image using adaptive threshold
+    val contours = mutableListOf<MatOfPoint>()
+    val hierarchy = Mat()
+    val contourList = mutableListOf<MatOfPoint>()
+    keyBorders.forEachIndexed { keyIndex, border ->
+        contours.clear()
+        val sliceWidth = (border.second - border.first)
+        val extraWidth = sliceWidth * 0.2
+        val widthThreshold = sliceWidth * 0.55
+        val borderStart =
+            (border.first - extraWidth).roundToInt().coerceIn(0, img.width())
+        val borderEnd = (border.second + extraWidth).roundToInt().coerceIn(0, img.width())
+        val slice = img.submat(0, img.height(), borderStart, borderEnd)
+
+        findContours(slice, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE)
+        for (x in 0 until hierarchy.width()) {
+            // entry = (next, previous, firstChild, parent)
+            val entry = hierarchy.get(0, x)
+            val parentIndex = entry[3].toInt()
+            if (parentIndex == -1) { // topmost contour
+                continue
+            }
+            if (hierarchy.get(0, parentIndex)[3].toInt() != -1) { // not the first child
+                continue
+            }
+            val (vertical, horizontal) = findExtrema(contours[x])
+            val (top, bottom) = vertical
+            val (left, right) = horizontal
+            if (right - left >= widthThreshold && bottom - top < 4000) {
+                rectangle(
+                    img,
+                    Point(border.first - extraWidth + left, top - 1),
+                    Point(border.first - extraWidth + right, bottom + 1),
+                    Scalar(0.0, 255.0, 0.0),
+                    3
+                )
+                val contour = MatOfPoint(
+                    *contours[x].toArray()
+                        .map { Point(border.first + it.x - extraWidth, it.y) }
+                        .toTypedArray()
+                )
+                contourList.add(contour)
+            }
+        }
+    }
+    println("contours: ${contourList.size}")
+    cvtColor(img, img, COLOR_GRAY2BGR)
+    for (contour in contourList) {
+        drawContours(
+            img,
+            listOf(contour),
+            -1,
+            Scalar(0.0, 255.0, 0.0),
+            //Scalar(Random.nextDouble(255.0), Random.nextDouble(255.0), Random.nextDouble(255.0)),
+            FILLED
+        )
+    }
+    saveImage("output/rgbAdaptThresh.jpg", img)
 }
 
 var counter = 0
@@ -119,8 +207,8 @@ fun extractPatrickNotes(img: Mat): Mat {
         drawContours(addedThresh, mutableListOf(contour), -1, Scalar(255.0, 255.0, 255.0), -1)
     }
 
-    val opening = Mat()
-    morphologyEx(addedThresh, opening, MORPH_OPEN, kernel)
+    /*val opening = Mat()
+    morphologyEx(addedThresh, opening, MORPH_OPEN, kernel)*/
     //saveImage("./output/opening.jpg", opening)
-    return opening
+    return addedThresh
 }
