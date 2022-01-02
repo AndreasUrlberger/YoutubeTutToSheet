@@ -529,81 +529,70 @@ private fun detectNotesInImagePP(
     keyBorders: List<Pair<Double, Double>>,
     notes: MutableList<KeyEvent>,
 ) {
-    // TODO: apply filtering to whole Image and only then slice it
-    val prepImage = extractNotes(img)
-    saveImage("slices/sliceP.jpg", prepImage)
+    cvtColor(img, img, COLOR_BGR2GRAY)
     keyBorders.forEachIndexed { keyIndex, border ->
         val bonusPx = 3
         val sliceWidth = (border.second - border.first)
         val widthThreshold = sliceWidth * 0.55
         val borderStart =
-            (border.first - bonusPx).roundToInt().coerceIn(0, prepImage.width())
-        val borderEnd = (border.second + bonusPx).roundToInt().coerceIn(0, prepImage.width())
-        val slice = prepImage.submat(0, prepImage.height(), borderStart, borderEnd)
+            (border.first - bonusPx).roundToInt().coerceIn(0, img.width())
+        val borderEnd = (border.second + bonusPx).roundToInt().coerceIn(0, img.width())
+        val slice = img.submat(0, img.height(), borderStart, borderEnd)
         saveImage("slices/slice${keyIndex}s.jpg", slice)
 
         val contours = mutableListOf<MatOfPoint>()
         val hierarchy = Mat()
-        findContours(slice, contours, hierarchy, RETR_LIST, CHAIN_APPROX_SIMPLE)
-        for (x in 0 until hierarchy.width()) {
-            for (y in 0 until hierarchy.height()) {
-                // entry = (next, previous, firstChild, parent)
-                val entry = hierarchy.get(y, x)
-                val (vertical, horizontal) = findExtrema(contours[x])
-                val (left, right) = horizontal
-                if (right - left >= widthThreshold) {
-                    val (realTop, realBottom) = getMiddleHeight(slice, left, right, vertical)
-                    //println("difference top: ${vertical.first - realTop} bottom: ${vertical.second - realBottom}")
-                    //val (realTop, realBottom) = vertical
-                    /*rectangle(
-                        img,
-                        Point(border.first - bonusPx + left, realTop - 1),
-                        Point(border.first - bonusPx + right, realBottom + 1),
-                        Scalar(0.0, 255.0, 0.0),
-                        3
-                    )*/
-                    // val contour = MatOfPoint(*contours[x].toArray().map { Point(border.first + it.x - bonusPx, it.y) }.toTypedArray())
-                    // drawContours(img, listOf(contour), -1, Scalar(Random.nextDouble(255.0), Random.nextDouble(255.0), Random.nextDouble(255.0)))
-                    // Get correct hand
-                    val middleX = ((realBottom + realTop) / 2).toInt()
-                    val middleY = ((left + right) / 2 + border.first - bonusPx).toInt()
-                    val hand = getHand(img.get(middleX, middleY))
+        val potNotes = mutableListOf<Rect>()
 
-                    // We only look at inner contours, so it is safe to extend them by one
-                    notes.add(KeyEvent(img.height() - (realBottom + 1), keyIndex, true, hand))
-                    notes.add(KeyEvent(img.height() - (realTop - 1), keyIndex, false, hand))
+        findContours(slice, contours, hierarchy, RETR_CCOMP, CHAIN_APPROX_SIMPLE)
+        for (x in 0 until hierarchy.width()) {
+            // entry = (next, previous, firstChild, parent)
+            val entry = hierarchy.get(0, x)
+            var parentIndex = entry[3].toInt()
+            var depth = 0
+            while (parentIndex != -1) {
+                depth++
+                parentIndex = hierarchy.get(0, parentIndex)[3].toInt()
+            }
+            if (depth != 1) {
+                continue
+            }
+            val bounding = boundingRect(contours[x])
+            if (bounding.width >= widthThreshold) {
+                potNotes.add(
+                    Rect(
+                        border.first.toInt() + bounding.x - bonusPx,
+                        bounding.y,
+                        bounding.width,
+                        bounding.height
+                    )
+                )
+            }
+        }
+
+        val innerNotes = mutableListOf<Rect>()
+        potNotes.forEach { one ->
+            potNotes.forEach { other ->
+                if (one.contains(other.tl()) && one.contains(other.br())) {
+                    innerNotes.add(other)
                 }
             }
         }
+        potNotes.removeAll(innerNotes)
+        for (note in potNotes) {
+            /*val middleX = ((note.br().y + note.tl().y) / 2).toInt()
+            val middleY = ((note.tl().x + note.br().x) / 2 + border.first - bonusPx).toInt()
+            val hand = getHand(img.get(middleX, middleY))*/
+
+            // We only look at inner contours, so it is safe to extend them by one
+            val down = img.height() - (note.br().y + 1)
+            val up = img.height() - (note.tl().y - 1)
+            notes.add(KeyEvent(down, keyIndex, true, 0))
+            notes.add(KeyEvent(up, keyIndex, false, 0))
+            rectangle(img, note, Scalar(255.0, 255.0, 255.0), Core.FILLED)
+        }
     }
     saveImage("./slices/slice.bmp", img)
-}
-
-fun getMiddleHeight(
-    img: Mat,
-    left: Double,
-    right: Double,
-    vertical: Pair<Double, Double>
-): Pair<Double, Double> {
-    val (top, bottom) = vertical
-    //println("top $top, bottom $bottom")
-    val xOI = ((left + right) / 2).roundToInt()
-    var realTop = 0
-    for (index in top.roundToInt()..bottom.roundToInt()) {
-        if (img[index, xOI].sum() > 0.5) {
-            realTop = index
-            break
-        }
-    }
-    var realBottom = 0
-    for (index in bottom.roundToInt() downTo top.roundToInt()) {
-        if (img[index, xOI].sum() > 0.5) {
-            realBottom = index
-            break
-        }
-    }
-    //println("realTop $realTop, realBottom $realBottom")
-    return Pair(realTop.toDouble(), realBottom.toDouble())
 }
 
 fun findExtrema(elem: MatOfPoint): Pair<Pair<Double, Double>, Pair<Double, Double>> {

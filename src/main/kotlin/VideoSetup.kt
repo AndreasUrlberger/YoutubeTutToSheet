@@ -91,7 +91,6 @@ private fun videoSetup(img: Mat) {
 
 private fun detectTest(img: Mat) {
     cvtColor(img, img, COLOR_BGR2GRAY)
-    saveImage("output/test.jpg", img)
     val keys = mutableListOf<Pair<Double, Double>>()
     val (_, keyboardWidth) = initKeys(keys)
     val pixelsPerInch = img.width() / keyboardWidth
@@ -117,25 +116,26 @@ private fun detectTest(img: Mat) {
         val borderEnd = (border.second + extraWidth).roundToInt().coerceIn(0, img.width())
         val slice = img.submat(0, img.height(), borderStart, borderEnd)
 
-        findContours(slice, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE)
+
+        findContours(slice, contours, hierarchy, RETR_CCOMP, CHAIN_APPROX_SIMPLE)
         for (x in 0 until hierarchy.width()) {
             // entry = (next, previous, firstChild, parent)
             val entry = hierarchy.get(0, x)
-            val parentIndex = entry[3].toInt()
-            if (parentIndex == -1) { // topmost contour
+            var parentIndex = entry[3].toInt()
+            var depth = 0
+            while (parentIndex != -1) {
+                depth++
+                parentIndex = hierarchy.get(0, parentIndex)[3].toInt()
+            }
+            if (depth != 1) {
                 continue
             }
-            if (hierarchy.get(0, parentIndex)[3].toInt() != -1) { // not the first child
-                continue
-            }
-            val (vertical, horizontal) = findExtrema(contours[x])
-            val (top, bottom) = vertical
-            val (left, right) = horizontal
-            if (right - left >= widthThreshold && bottom - top < 4000) {
+            val bounding = boundingRect(contours[x])
+            if (bounding.width >= widthThreshold) {
                 rectangle(
                     img,
-                    Point(border.first - extraWidth + left, top - 1),
-                    Point(border.first - extraWidth + right, bottom + 1),
+                    Point(border.first - extraWidth + bounding.tl().y, bounding.tl().x - 1),
+                    Point(border.first - extraWidth + bounding.br().y, bounding.br().x + 1),
                     Scalar(0.0, 255.0, 0.0),
                     3
                 )
@@ -148,6 +148,20 @@ private fun detectTest(img: Mat) {
             }
         }
     }
+
+
+    val contoursToRemove = mutableListOf<MatOfPoint>()
+    contourList.forEach { one ->
+        contourList.forEach { other ->
+            val oneBounding = boundingRect(one)
+            val otherBounding = boundingRect(other)
+            if (oneBounding.contains(otherBounding.tl()) && oneBounding.contains(otherBounding.br())) {
+                contoursToRemove.add(other)
+            }
+        }
+    }
+    contourList.removeAll(contoursToRemove)
+
     println("contours: ${contourList.size}")
     cvtColor(img, img, COLOR_GRAY2BGR)
     for (contour in contourList) {
@@ -157,7 +171,7 @@ private fun detectTest(img: Mat) {
             -1,
             Scalar(0.0, 255.0, 0.0),
             //Scalar(Random.nextDouble(255.0), Random.nextDouble(255.0), Random.nextDouble(255.0)),
-            FILLED
+            1
         )
     }
     saveImage("output/rgbAdaptThresh.jpg", img)
