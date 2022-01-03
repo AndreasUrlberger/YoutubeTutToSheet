@@ -16,7 +16,9 @@ fun main(args: Array<String>) {
     OpenCV.loadLocally()
     var big = loadImage(args[0])
     //big = big.submat(0, (big.height() * 0.5).toInt(), 0, big.width())
-    detectTest(big)
+    videoSetup(big)
+    val adapt = loadImage("output/adaptThreshGray.jpg")
+    detectTest(adapt)
 }
 
 private fun renderLines(img: Mat) {
@@ -69,12 +71,16 @@ private fun videoSetup(img: Mat) {
     saveImage("./output/addedThresh.jpg", addedThresh)
 
     // adaptive
-    val adaptThresh0 = adaptThresh(rgbChannels[0], 5.0)
-    val adaptThresh1 = adaptThresh(rgbChannels[1], 5.0)
-    val adaptThresh2 = adaptThresh(rgbChannels[2], 5.0)
+    val adaptThresh0 = adaptThresh(rgbChannels[0], 11, 2.0)
+    val adaptThresh1 = adaptThresh(rgbChannels[1], 5, 5.0)
+    val adaptThresh2 = adaptThresh(rgbChannels[2], 11, 5.0)
     saveImage("output/adaptThreshBlue.jpg", adaptThresh0)
     saveImage("output/adaptThreshGreen.jpg", adaptThresh1)
     saveImage("output/adaptThreshRed.jpg", adaptThresh2)
+    val gray = Mat()
+    cvtColor(img, gray, COLOR_BGR2GRAY)
+    val adaptThreshGray = adaptThresh(gray, 7, 7.0)
+    saveImage("output/adaptThreshGray.jpg", adaptThreshGray)
 
     val addedAdaptThresh = Mat()
     Core.bitwise_and(adaptThresh0, adaptThresh1, addedAdaptThresh)
@@ -198,7 +204,7 @@ fun extractPatrickNotes(img: Mat): Mat {
     split(img, rgbChannels)
     val weightsBGR = doubleArrayOf(150.0, 110.0, 150.0)
     val addedThresh = computeAddedThresh(rgbChannels, weightsBGR)
-    saveImage("slices/slice${counter}a.jpg", addedThresh)
+    //saveImage("slices/slice${counter}a.jpg", addedThresh)
     counter++
 
     findContours(addedThresh, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE)

@@ -243,13 +243,15 @@ private fun recMergeImages() {
     val frames = mutableListOf<Mat>()
     val startFrame = Mat()
     cap.read(startFrame)
-    adaptThresh(startFrame, 5.0).copyTo(startFrame)
+    cvtColor(startFrame, startFrame, COLOR_BGR2GRAY)
+    adaptThresh(startFrame, 7, 7.0).copyTo(startFrame)
     frames.add(startFrame)
     val small = Mat()
     // save first image
     for ((counter, offset) in offsets.withIndex()) {
         cap.read(small)
-        adaptThresh(small, 5.0).copyTo(small)
+        cvtColor(small, small, COLOR_BGR2GRAY)
+        adaptThresh(small, 7, 7.0).copyTo(small)
         val cut = small.submat(0, offset.plus(1).roundToInt(), 0, small.width())
         frames.add(cut)
         println("added frame $counter")
@@ -269,13 +271,18 @@ private fun recMergeImages() {
     saveImage("output/appended.bmp", fullImage)
 }
 
-fun adaptThresh(img: Mat, C: Double): Mat {
-    val channels = mutableListOf<Mat>()
-    split(img, channels)
-
+fun adaptThresh(channel: Mat, blockSize: Int, C: Double): Mat {
     val adaptThresh = Mat()
     // BORDER_REPLICATE | #BORDER_ISOLATED
-    adaptiveThreshold(channels[1], adaptThresh, 255.0, BORDER_REPLICATE, THRESH_BINARY_INV, 5, C)
+    adaptiveThreshold(
+        channel,
+        adaptThresh,
+        255.0,
+        BORDER_REPLICATE,
+        THRESH_BINARY_INV,
+        blockSize,
+        C
+    )
     return adaptThresh
 }
 
@@ -538,7 +545,7 @@ private fun detectNotesInImagePP(
             (border.first - bonusPx).roundToInt().coerceIn(0, img.width())
         val borderEnd = (border.second + bonusPx).roundToInt().coerceIn(0, img.width())
         val slice = img.submat(0, img.height(), borderStart, borderEnd)
-        saveImage("slices/slice${keyIndex}s.jpg", slice)
+        //saveImage("slices/slice${keyIndex}s.jpg", slice)
 
         val contours = mutableListOf<MatOfPoint>()
         val hierarchy = Mat()
