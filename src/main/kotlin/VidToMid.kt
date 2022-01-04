@@ -1,8 +1,8 @@
 import nu.pattern.OpenCV
 import org.opencv.core.*
-import org.opencv.imgcodecs.Imgcodecs
 import org.opencv.imgproc.Imgproc
 import org.opencv.videoio.VideoCapture
+import org.opencv.videoio.Videoio.CAP_PROP_FPS
 import org.opencv.videoio.Videoio.CAP_PROP_POS_FRAMES
 import java.io.File
 import java.io.FileInputStream
@@ -20,16 +20,25 @@ import kotlin.system.exitProcess
 
 
 fun main() {
-    val conv = VidToMid("input/arrival_short.mp4", VidSettings(""), false)
-    conv.getOffsets(30.0, 2)
-    conv.mergeImages(2)
-    conv.imageToMidi(30.0, 2, 154.0)
+    val settings = PietschmannSettings(
+        bpm = 154.0,
+        midiRes = 480.0,
+        framesToSkip = 2
+    )
+    val conv = VidToMid("input/arrival_short.mp4", settings, true)
+    println("now calculate offset")
+    conv.getOffsets()
+    println("now merge images")
+    conv.mergeImages()
+    println("now detect notes")
+    conv.imageToMidi()
+    conv.release()
 }
 
 class VidToMid(
     vidPath: String,
-    var settings: VidSettings,
-    var safeToStorage: Boolean,
+    private var conf: VidSettings,
+    private var saveToStorage: Boolean,
 ) {
 
     init {
@@ -37,7 +46,9 @@ class VidToMid(
     }
 
     private val cap: VideoCapture
-    private var appendedImage: Mat? = null
+    private var appendedImage: Mat = Mat()
+    private val notes = mutableListOf<KeyEvent>()
+    private val offsets = mutableListOf<Double>()
 
     init {
         if (Files.notExists(Path(vidPath)))
@@ -45,167 +56,91 @@ class VidToMid(
         cap = VideoCapture(vidPath)
     }
 
+    private fun fps() = cap.get(CAP_PROP_FPS) / (conf.framesToSkip + 1)
 
-    private var FRAMES_TO_SKIP = 0
-    private var INPUT_FPS = 0.0
-    private fun fps() = INPUT_FPS / (FRAMES_TO_SKIP + 1)
-    private var BPM = 0.0
-    private var MIDI_RES = 0.0
-
-    private var KEY_START = 'a'
-    private var KEY_START_NUM = -3
-    private var KEY_END = 'c'
-    private var KEY_END_NUM = 5
-
-    private val realKeyDimensions = listOf(
-        // (left position relative to the start of last octave, width of the key, isWhiteKey)
-        Triple(0.0, 0.9, true), // c
-        // (left position relative to end of last white key, same for the right position, isWhiteKey)
-        Triple(-0.35, 0.15, false), // cis
-        Triple(0.9, 0.9, true), // d
-        Triple(-0.15, 0.35, false), // dis
-        Triple(1.8, 0.9, true), // e
-        Triple(2.7, 0.95, true), // f
-        Triple(-0.4, 0.1, false), // fis
-        Triple(3.65, 0.95, true), // g
-        Triple(-0.25, 0.25, false), // gis
-        Triple(4.6, 0.95, true), // a
-        Triple(-0.1, 0.4, false), // ais
-        Triple(5.55, 0.95, true), // h
-    )
-
-    private val simpleKeyDimensions = listOf(
-        // (left position relative to the start of last octave, width of the key, isWhiteKey)
-        Triple(0.0, 1 / 7.0, true), // c
-        // (left position relative to end of last white key, same for the right position, isWhiteKey)
-        Triple(-0.35 / 6.5, 0.15 / 6.5, false), // cis
-        Triple(1 / 7.0, 1 / 7.0, true), // d
-        Triple(-0.15 / 6.5, 0.35 / 6.5, false), // dis
-        Triple(2 / 7.0, 1 / 7.0, true), // e
-        Triple(3 / 7.0, 1 / 7.0, true), // f
-        Triple(-0.4 / 6.5, 0.1 / 6.5, false), // fis
-        Triple(4 / 7.0, 1 / 7.0, true), // g
-        Triple(-0.25 / 6.5, 0.25 / 6.5, false), // gis
-        Triple(5 / 7.0, 1 / 7.0, true), // a
-        Triple(-0.1 / 6.5, 0.4 / 6.5, false), // ais
-        Triple(6 / 7.0, 1 / 7.0, true), // h
-    ).map { Triple(it.first.times(6.5), it.second.times(6.5), it.third) }
-
-
-    // Sheet Music Boss
-    private val imageRangeSHB = Pair(0.25, 0.5)
-    private val prepareImageSHB: (Mat) -> Mat = { img ->
-        val thresholds = doubleArrayOf(80.0, 85.0, 80.0)
-        val channels = mutableListOf<Mat>()
-        Core.split(img, channels)
-        computeAddedThresh(channels, thresholds)
+    fun release() {
+        cap.release()
     }
-    private val extractNotesSMB: (Mat) -> Mat = { img ->
-        val thresholds = doubleArrayOf(80.0, 85.0, 80.0)
-        val slices = mutableListOf<Mat>()
-        Core.split(img, slices)
-        computeAddedThresh(slices, thresholds)
-    }
-    private val maxImageDiffSMB = 0.25
-    private val keyboardDistOriginSMB = 0.47
-    private val keyboardDistCoeffSMB = 0.043
 
-    // Patrick Pietschmann
-    private val imageRangePP = Pair(0.0, 0.5)
-    private val prepareImagePP: (Mat) -> Mat = { img ->
-        val thresh = extractPatrickNotes(img)
-        val start = (thresh.height() * 0.25).toInt()
-        val end = (thresh.height() * 0.75).toInt()
-        thresh.submat(start, end, 0, thresh.width())
-    }
-    private val extractNotesPP: (Mat) -> Mat = ::extractPatrickNotes
-    private val maxImageDiffPP = 0.50
-    private val keyboardDistOriginPP = 0.47
-    private val keyboardDistCoeffPP = 0.043
-
-    // (Pair<StartPercent, EndPercent>)
-    private var FRAME_LIMITS = imageRangePP
-
-    // Lambda that modifies an image in a way that it makes it easier to find the notes
-    private var prepareImage: (Mat) -> Mat = prepareImagePP
-    private var extractNotes: (Mat) -> Mat = extractNotesPP
-
-    private var MAX_IMAGE_DIFF = maxImageDiffPP
-    private var KEYBOARD_DIST_COEFF = keyboardDistCoeffPP
-    private var KEYBOARD_DIST_ORIGIN = keyboardDistOriginPP
-    private var KEY_DIMENSIONS = simpleKeyDimensions
-
-    fun getOffsets(fps: Double, framesToSkip: Int) {
-        INPUT_FPS = fps
-        FRAMES_TO_SKIP = framesToSkip
+    fun getOffsets() {
         getVideoOffsets()
     }
 
-    fun mergeImages(framesToSkip: Int) {
-        FRAMES_TO_SKIP = framesToSkip
+    fun mergeImages() {
+        if (saveToStorage) {
+            offsets.clear()
+            val loadedOffsets = FileInputStream("output/offsets.txt").use {
+                it.readAllBytes().decodeToString().splitToSequence(", ")
+                    .map { elem -> elem.toDouble() }
+                    .toList()
+            }
+            offsets.addAll(loadedOffsets)
+        }
         recMergeImages()
     }
 
-    fun imageToMidi(fps: Double, framesToSkip: Int, bpm: Double, midiRes: Double = 480.0) {
-        INPUT_FPS = fps
-        FRAMES_TO_SKIP = framesToSkip
-        BPM = bpm
-        MIDI_RES = midiRes
+    fun imageToMidi() {
+        if (saveToStorage) {
+            loadImage("output/appended.bmp").copyTo(appendedImage)
+            Imgproc.cvtColor(appendedImage, appendedImage, Imgproc.COLOR_BGR2GRAY)
+
+            offsets.clear()
+            val loadedOffsets = FileInputStream("output/offsets.txt").use {
+                it.readAllBytes().decodeToString().splitToSequence(", ")
+                    .map { elem -> elem.toDouble() }
+                    .toList()
+            }
+            offsets.addAll(loadedOffsets)
+        }
         longImageToMidi()
     }
 
     fun loadSettingsFile(settings: VidSettings) {
-        this.settings = settings
+        this.conf = settings
     }
 
     private fun longImageToMidi() {
-        val img = loadImage("./input/longImage.bmp")
-        if (img.empty())
+        if (appendedImage.empty())
             throw IllegalArgumentException("Image is empty")
-        val offsets = FileInputStream("./output/offsetsCorrected.txt").use {
-            it.readAllBytes().decodeToString().splitToSequence(", ").map { elem -> elem.toDouble() }
-                .toList()
-        }
         if (offsets.isEmpty())
             throw IllegalArgumentException("The offsets cannot be empty")
 
         // detect notes
-        val keys = mutableListOf<Pair<Double, Double>>()
-        val (_, keyboardWidth) = initKeys(keys)
-        val pixelsPerInch = img.width() / keyboardWidth
-        val tunedKeyBorders = tuneKeyBorders(keys)
-        val keyBorders = tunedKeyBorders.asSequence().map { old ->
+        val keyBorders = mutableListOf<Pair<Double, Double>>()
+        val (_, keyboardWidth) = initKeys(keyBorders)
+        val pixelsPerInch = appendedImage.width() / keyboardWidth
+        tuneKeyBorders(keyBorders)
+        keyBorders.replaceAll { old ->
             Pair(
                 old.first * pixelsPerInch,
-                ((old.second * pixelsPerInch).coerceAtMost(img.width().toDouble()))
+                ((old.second * pixelsPerInch).coerceAtMost(appendedImage.width().toDouble()))
             )
-        }.toList()
-        val notes = mutableListOf<KeyEvent>()
-        detectNotesInImagePP(img, keyBorders, notes)
+        }
+        detectNotesInImage(keyBorders)
 
         // create Timeline
-        val shiftedTimeline = shiftTimelineToStart(notes)
+        shiftTimelineToStart(notes)
 
         // create midi
-        val bps = BPM / 60.0
+        val bps = conf.bpm / 60.0
         val pxPerSec = offsets.average() * fps()
         println("pixel per second $pxPerSec")
         val pxPerBeat = pxPerSec / bps
-        val playSpeed = (pxPerBeat / MIDI_RES)
-        createMidi(shiftedTimeline, playSpeed)
+        val playSpeed = (pxPerBeat / conf.midiRes)
+        createMidi(playSpeed)
     }
 
     private fun getVideoOffsets() {
         cap.set(CAP_PROP_POS_FRAMES, 0.0) // make sure we are at the start
+        offsets.clear()
         val frame = Mat()
         var oldFrame: Mat
-        val offsets = mutableListOf<Double>()
-        getFrame(cap, frame, true)
+        getFrame(frame, true)
         if (!frame.empty()) {
-            oldFrame = prepareImage(frame)
+            oldFrame = conf.prepareImage(frame)
             oldFrame = oldFrame.submat(0, (oldFrame.height() * 0.75).toInt(), 0, oldFrame.width())
-            skipFrames(cap, FRAMES_TO_SKIP, frame)
-            getFrame(cap, frame, true)
+            skipFrames(conf.framesToSkip, frame)
+            getFrame(frame, true)
             var counter = 0
             while (!frame.empty() && counter < 1_000_000) {
                 if (counter % 20 == 0) {
@@ -216,34 +151,29 @@ class VidToMid(
                 }
 
                 val result = Mat()
-                val prepFrame = prepareImage(frame)
-                //saveImage("slices/slice$counter.jpg", prepFrame)
+                val prepFrame = conf.prepareImage(frame)
                 Imgproc.matchTemplate(oldFrame, prepFrame, result, Imgproc.TM_SQDIFF)
                 val mmr = Core.minMaxLoc(result)
                 offsets.add(mmr.minLoc.y)
-                println("$counter minMax: ${mmr.minLoc.y}")
-                //saveImage("./output/thresh$counter.jpg", thresh1)
 
                 oldFrame =
                     prepFrame.submat(0, (prepFrame.height() * 0.75).toInt(), 0, prepFrame.width())
-                skipFrames(cap, FRAMES_TO_SKIP, frame)
-                getFrame(cap, frame, true)
+                skipFrames(conf.framesToSkip, frame)
+                getFrame(frame, true)
                 counter++
             }
         }
-        cap.release()
-
         val median = median(offsets)
-        val correctedOffsets =
-            offsets.map { value -> if (abs(value - median) > median * MAX_IMAGE_DIFF) median else value }
-                .toList()
+        offsets.replaceAll { value -> if (abs(value - median) > median * conf.maxImageDiff) median else value }
 
-        FileOutputStream("./output/offsetsCorrected.txt").use {
-            it.write(correctedOffsets.joinToString(", ").toByteArray())
+        if (saveToStorage) {
+            FileOutputStream("./output/offsets.txt").use {
+                it.write(offsets.joinToString(", ").toByteArray())
+            }
         }
     }
 
-    private fun skipFrames(cap: VideoCapture, framesToSkip: Int, placeholder: Mat? = null) {
+    private fun skipFrames(framesToSkip: Int, placeholder: Mat? = null) {
         val img = placeholder ?: Mat()
         for (i in 0 until framesToSkip) {
             cap.read(img)
@@ -258,67 +188,51 @@ class VidToMid(
     }
 
     private fun recMergeImages() {
-        val offsets = FileInputStream("output/offsetsCorrected.txt").use {
-            it.readAllBytes().decodeToString().splitToSequence(", ").map { elem -> elem.toDouble() }
-                .toList()
+        if (offsets.isEmpty()) {
+            throw IllegalStateException("offsets have not been calculated yet")
         }
         cap.set(CAP_PROP_POS_FRAMES, 0.0) // make sure we are at the start
         val frames = mutableListOf<Mat>()
         val startFrame = Mat()
-        getFrame(cap, startFrame)
+        getFrame(startFrame)
         Imgproc.cvtColor(startFrame, startFrame, Imgproc.COLOR_BGR2GRAY)
         adaptThresh(startFrame, 7, 7.0).copyTo(startFrame)
         frames.add(startFrame)
         val small = Mat()
         // save first image
-        skipFrames(cap, FRAMES_TO_SKIP, small)
+        skipFrames(conf.framesToSkip, small)
         for ((counter, offset) in offsets.withIndex()) {
-            getFrame(cap, small)
+            getFrame(small)
             Imgproc.cvtColor(small, small, Imgproc.COLOR_BGR2GRAY)
             adaptThresh(small, 7, 7.0).copyTo(small)
             val cut = small.submat(0, offset.plus(1).roundToInt(), 0, small.width())
-            println("adds frame for offset: $counter")
             frames.add(cut)
-            skipFrames(cap, FRAMES_TO_SKIP, small)
+            skipFrames(conf.framesToSkip, small)
             if (counter % 100 == 0) {
+                println("adds frame for offset: $counter")
                 System.gc()
             }
         }
 
         frames.reverse()
 
-        val fullImage = Mat()
         println("now concat images")
-        Core.vconcat(frames, fullImage)
-        saveImage("output/appended.bmp", fullImage)
-    }
-
-    private fun adaptThresh(channel: Mat, blockSize: Int, C: Double): Mat {
-        val adaptThresh = Mat()
-        // BORDER_REPLICATE | #BORDER_ISOLATED
-        Imgproc.adaptiveThreshold(
-            channel,
-            adaptThresh,
-            255.0,
-            Core.BORDER_REPLICATE,
-            Imgproc.THRESH_BINARY_INV,
-            blockSize,
-            C
-        )
-        return adaptThresh
+        Core.vconcat(frames, appendedImage)
+        if (saveToStorage) {
+            saveImage("output/appended.bmp", appendedImage)
+        }
     }
 
     /**
-     * Gets the next frame from the given VideoCapture and cuts it to the given
+     * Gets the next frame from the VideoCapture and cuts it to the given
      * limits
-     * @param cap The VideoCapture to take the frame from.
      * @param frame The Mat to fill.
      */
-    private fun getFrame(cap: VideoCapture, frame: Mat, cut: Boolean = false) {
+    private fun getFrame(frame: Mat, cut: Boolean = false) {
         cap.read(frame)
         if (cut && !frame.empty()) {
-            val start = (frame.height() * FRAME_LIMITS.first).toInt()
-            val end = (frame.height() * FRAME_LIMITS.second).toInt()
+            val start = (frame.height() * conf.frameLimits.first).toInt()
+            val end = (frame.height() * conf.frameLimits.second).toInt()
             Mat(frame, Range(start, end)).copyTo(frame)
         }
     }
@@ -327,14 +241,19 @@ class VidToMid(
         outKeys: MutableList<Pair<Double, Double>>
     ): Pair<Int, Double> {
         val keyCodes = mapOf('a' to 9, 'h' to 11, 'c' to 0, 'd' to 2, 'e' to 4, 'f' to 5, 'g' to 7)
-        checkBorderKeys(KEY_START_NUM, KEY_END_NUM, KEY_START, KEY_END)
+        checkBorderKeys(
+            conf.keyStartNum,
+            conf.keyEndNum,
+            conf.keyStart,
+            conf.keyEnd
+        )
 
         var whiteKeys = 0
         var xOffset = 0.0
         var width = 0.0
         // lower single keys
-        for (key in (keyCodes[KEY_START] ?: 0)..(keyCodes.values.maxOrNull() ?: 0)) {
-            val dim = KEY_DIMENSIONS[key]
+        for (key in (keyCodes[conf.keyStart] ?: 0)..(keyCodes.values.maxOrNull() ?: 0)) {
+            val dim = conf.keyDimensions[key]
             if (dim.third) { // white key
                 outKeys.add(Pair(xOffset, xOffset + dim.second))
                 xOffset += dim.second
@@ -345,9 +264,9 @@ class VidToMid(
             }
         }
         // octave keys
-        for (scale in (KEY_START_NUM + 1) until KEY_END_NUM) {
-            for (key in KEY_DIMENSIONS.indices) {
-                val dim = KEY_DIMENSIONS[key]
+        for (scale in (conf.keyStartNum + 1) until conf.keyEndNum) {
+            for (key in conf.keyDimensions.indices) {
+                val dim = conf.keyDimensions[key]
                 if (dim.third) { // white key
                     outKeys.add(Pair(xOffset, xOffset + dim.second))
                     xOffset += dim.second
@@ -359,8 +278,8 @@ class VidToMid(
             }
         }
         // upper single keys
-        for (key in (keyCodes.values.minOrNull() ?: 0)..(keyCodes[KEY_END] ?: 0)) {
-            val dim = KEY_DIMENSIONS[key]
+        for (key in (keyCodes.values.minOrNull() ?: 0)..(keyCodes[conf.keyEnd] ?: 0)) {
+            val dim = conf.keyDimensions[key]
             if (dim.third) { // white key
                 outKeys.add(Pair(xOffset, xOffset + dim.second))
                 xOffset += dim.second
@@ -374,11 +293,12 @@ class VidToMid(
         return Pair(whiteKeys, width)
     }
 
-    private fun tuneKeyBorders(borders: List<Pair<Double, Double>>): List<Pair<Double, Double>> {
+    private fun tuneKeyBorders(borders: MutableList<Pair<Double, Double>>) {
         val width = borders.maxOf { it.second }
-        return borders.map { (left, right) ->
-            val aLeft = distort(left, KEYBOARD_DIST_ORIGIN, width, KEYBOARD_DIST_COEFF)
-            val aRight = distort(right, KEYBOARD_DIST_ORIGIN, width, KEYBOARD_DIST_COEFF)
+        borders.replaceAll { (left, right) ->
+            val aLeft = distort(left, conf.keyboardDistOrigin, width, conf.keyboardDistCoef)
+            val aRight =
+                distort(right, conf.keyboardDistOrigin, width, conf.keyboardDistCoef)
             Pair(aLeft, aRight)
         }
     }
@@ -406,23 +326,23 @@ class VidToMid(
             throw java.lang.IllegalArgumentException("keyHigh must be one of [a, h, c, d, e, f, g]")
     }
 
-    private fun shiftTimelineToStart(timeline: List<KeyEvent>): List<KeyEvent> {
-        if (timeline.isEmpty()) {
-            return timeline
+    private fun shiftTimelineToStart(notes: MutableList<KeyEvent>) {
+        if (notes.isNotEmpty()) {
+            val offset = notes.minOf { it.pos }
+            notes.replaceAll { KeyEvent(it.pos - offset, it.key, it.type, it.hand) }
         }
-        val offset = timeline.minOf { it.pos }
-        return timeline.map { KeyEvent(it.pos - offset, it.key, it.type, it.hand) }.toList()
     }
 
-    private fun createMidi(timeline: List<KeyEvent>, playSpeed: Double) {
+    private fun createMidi(playSpeed: Double) {
         val sequencer = MidiSystem.getSequencer()
         sequencer.open()
         // Creating a sequence.
         // PPQ(Pulse per ticks) is used to specify timing, type and 4 is the timing resolution.
-        val sequence = javax.sound.midi.Sequence(javax.sound.midi.Sequence.PPQ, MIDI_RES.toInt())
+        val sequence =
+            javax.sound.midi.Sequence(javax.sound.midi.Sequence.PPQ, conf.midiRes.toInt())
 
         val baseNote = 21 // the code of the lowest note on the piano, the A2
-        val timelineSorted = timeline.sortedBy { it.pos }
+        val timelineSorted = notes.sortedBy { it.pos }
 
         // Creating a track on our sequence upon which MIDI events would be placed
         val track = sequence.createTrack()
@@ -432,9 +352,7 @@ class VidToMid(
                 makeEvent(
                     if (event.type) ShortMessage.NOTE_ON else ShortMessage.NOTE_OFF,
                     //event.hand,
-                    0,
                     event.key + baseNote,
-                    100,
                     event.pos.div(playSpeed).roundToInt()
                 )
             )
@@ -444,7 +362,7 @@ class VidToMid(
         sequencer.sequence = sequence
 
         // Specifies the beat rate in beats per minute.
-        sequencer.tempoInBPM = BPM.toFloat()
+        sequencer.tempoInBPM = conf.bpm.toFloat()
 
         println("storing midi file")
         val file = File("./output/midi.mid")
@@ -452,12 +370,12 @@ class VidToMid(
         exitProcess(1)
     }
 
-    private fun detectNotesInImagePP(
-        img: Mat,
+    private fun detectNotesInImage(
         keyBorders: List<Pair<Double, Double>>,
-        notes: MutableList<KeyEvent>,
     ) {
-        Imgproc.cvtColor(img, img, Imgproc.COLOR_BGR2GRAY)
+        val img = Mat()
+        appendedImage.copyTo(img)
+        notes.clear()
         keyBorders.forEachIndexed { keyIndex, border ->
             val bonusPx = 3
             val sliceWidth = (border.second - border.first)
@@ -466,7 +384,6 @@ class VidToMid(
                 (border.first - bonusPx).roundToInt().coerceIn(0, img.width())
             val borderEnd = (border.second + bonusPx).roundToInt().coerceIn(0, img.width())
             val slice = img.submat(0, img.height(), borderStart, borderEnd)
-            //saveImage("slices/slice${keyIndex}s.jpg", slice)
 
             val contours = mutableListOf<MatOfPoint>()
             val hierarchy = Mat()
@@ -526,7 +443,7 @@ class VidToMid(
                 Imgproc.rectangle(img, note, Scalar(255.0, 255.0, 255.0), Core.FILLED)
             }
         }
-        saveImage("./slices/slice.bmp", img)
+        saveImage("./output/detectedNotes.bmp", img)
     }
 
     private fun getHand(colors: DoubleArray): Int {
@@ -538,45 +455,46 @@ class VidToMid(
         }
     }
 
-    private fun computeAddedThresh(channels: MutableList<Mat>, weights: DoubleArray): Mat {
-        if (weights.size < 3) {
-            throw IllegalArgumentException("size of weights must be exactly 3")
-        }
-        val threshBlue = Mat()
-        val threshGreen = Mat()
-        val threshRed = Mat()
-        val limitBlue = weights[2]
-        val limitGreen = weights[1]
-        val limitRed = weights[0]
-        Imgproc.threshold(channels[0], threshBlue, limitBlue, 255.0, Imgproc.THRESH_BINARY)
-        Imgproc.threshold(channels[1], threshGreen, limitGreen, 255.0, Imgproc.THRESH_BINARY)
-        Imgproc.threshold(channels[2], threshRed, limitRed, 255.0, Imgproc.THRESH_BINARY)
-
-        val addedThresh = Mat()
-        Core.bitwise_and(threshBlue, threshGreen, addedThresh)
-        Core.bitwise_and(addedThresh, threshRed, addedThresh)
-        return addedThresh
-    }
-
     private fun makeEvent(
         command: Int,
-        channel: Int,
         note: Int,
-        velocity: Int,
         tick: Int
     ): MidiEvent {
         val a = ShortMessage()
-        a.setMessage(command, channel, note, velocity)
+        a.setMessage(command, 0, note, 100)
         return MidiEvent(a, tick.toLong())
     }
 
-    private fun loadImage(imagePath: String): Mat {
-        return Imgcodecs.imread(imagePath)
-            ?: throw IllegalArgumentException("Could not find image at path '$imagePath'")
-    }
 
-    private fun saveImage(path: String, image: Mat) {
-        Imgcodecs.imwrite(path, image)
+    private fun renderLines(img: Mat) {
+        val keyBorders = mutableListOf<Pair<Double, Double>>()
+        val (_, keyboardWidth) = initKeys(keyBorders)
+        val pixelsPerInch = img.width() / keyboardWidth
+        keyBorders.replaceAll { old ->
+            Pair(
+                old.first * pixelsPerInch,
+                ((old.second * pixelsPerInch).coerceAtMost(img.width().toDouble()))
+            )
+        }
+
+        val top = (img.height() - 1).toDouble()
+        val widthWhite = keyBorders.maxOf { it.second - it.first }
+        tuneKeyBorders(keyBorders)
+        keyBorders.forEach { (left, right) ->
+            if ((right - left) > widthWhite * 0.8) {
+                Imgproc.rectangle(
+                    img,
+                    Point(left, 0.0),
+                    Point(right, top),
+                    Scalar(0.0, 255.0, 0.0),
+                    1
+                )
+            }
+        }
+
+        saveImage("output/lines.jpg", img)
+
+        println("render Lines")
     }
 
     private data class KeyEvent(val pos: Double, val key: Int, val type: Boolean, val hand: Int)
