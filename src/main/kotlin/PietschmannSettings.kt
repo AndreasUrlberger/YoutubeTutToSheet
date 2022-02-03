@@ -30,10 +30,19 @@ private val simpleKeyDimensions = listOf(
 ).map { Triple(it.first.times(6.5), it.second.times(6.5), it.third) }
 
 
+/*
+Presets:
+For Arrival of the Birds
+    bpm = 154.0,
+    midiRes = 480.0,
+    framesToSkip = 2
+ */
 class PietschmannSettings(
     bpm: Double = 120.0,
     midiRes: Double = 480.0,
-    framesToSkip: Int = 2
+    framesToSkip: Int = 2,
+    timeSignatureNominator: Int,
+    timeSignatureDenominator: Int
 ) : VidSettings(
     bpm = bpm,
     midiRes = midiRes,
@@ -50,5 +59,8 @@ class PietschmannSettings(
     keyboardDistCoef = keyboardDistCoef,
     keyboardDistOrigin = keyboardDistOrigin,
     keyDimensions = simpleKeyDimensions,
-    frameLimits = imageRange
+    frameLimits = imageRange,
+
+    timeSignatureNominator = timeSignatureNominator,
+    timeSignatureDenominator = timeSignatureDenominator,
 )

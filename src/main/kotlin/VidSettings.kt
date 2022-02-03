@@ -4,6 +4,8 @@ open class VidSettings(
     val bpm: Double = 120.0,
     val midiRes: Double = 480.0,
     val framesToSkip: Int = 2,
+    val timeSignatureNominator: Int,
+    val timeSignatureDenominator: Int,
 
     val keyStart: Char = 'a',
     val keyStartNum: Int = -3,

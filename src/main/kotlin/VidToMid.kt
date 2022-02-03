@@ -8,10 +8,11 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.file.Files
-import javax.sound.midi.MidiEvent
-import javax.sound.midi.MidiSystem
-import javax.sound.midi.ShortMessage
+import java.util.*
+import javax.sound.midi.*
 import kotlin.io.path.Path
 import kotlin.math.abs
 import kotlin.math.pow
@@ -19,18 +20,21 @@ import kotlin.math.roundToInt
 import kotlin.system.exitProcess
 
 
-fun main() {
+fun main(args: Array<String>) {
     val settings = PietschmannSettings(
-        bpm = 154.0,
+        bpm = args[0].toDouble(),
         midiRes = 480.0,
-        framesToSkip = 2
+        framesToSkip = 2,
+        timeSignatureDenominator = 4,
+        timeSignatureNominator = 4,
     )
-    val conv = VidToMid("input/arrival_short.mp4", settings, true)
+    val conv = VidToMid("input/Dune_Part2.mp4", settings, true)
     println("now calculate offset")
     conv.getOffsets()
     println("now merge images")
     conv.mergeImages()
     println("now detect notes")
+    //conv.rasterizeNotes()
     conv.imageToMidi()
     conv.release()
 }
@@ -95,6 +99,35 @@ class VidToMid(
         longImageToMidi()
     }
 
+    fun renderLines(img: Mat) {
+        val keyBorders = mutableListOf<Pair<Double, Double>>()
+        val (_, keyboardWidth) = initKeys(keyBorders)
+        val pixelsPerInch = img.width() / keyboardWidth
+        keyBorders.replaceAll { old ->
+            Pair(
+                old.first * pixelsPerInch,
+                ((old.second * pixelsPerInch).coerceAtMost(img.width().toDouble()))
+            )
+        }
+
+        val top = (img.height() - 1).toDouble()
+        val widthWhite = keyBorders.maxOf { it.second - it.first }
+        tuneKeyBorders(keyBorders)
+        keyBorders.forEach { (left, right) ->
+            if ((right - left) > widthWhite * 0.8) {
+                Imgproc.rectangle(
+                    img,
+                    Point(left, 0.0),
+                    Point(right, top),
+                    Scalar(0.0, 255.0, 0.0),
+                    1
+                )
+            }
+        }
+
+        saveImage("output/lines.jpg", img)
+    }
+
     fun loadSettingsFile(settings: VidSettings) {
         this.conf = settings
     }
@@ -123,7 +156,7 @@ class VidToMid(
 
         // create midi
         val bps = conf.bpm / 60.0
-        val pxPerSec = offsets.average() * fps()
+        val pxPerSec = median(offsets) * fps()
         println("pixel per second $pxPerSec")
         val pxPerBeat = pxPerSec / bps
         val playSpeed = (pxPerBeat / conf.midiRes)
@@ -338,33 +371,37 @@ class VidToMid(
         sequencer.open()
         // Creating a sequence.
         // PPQ(Pulse per ticks) is used to specify timing, type and 4 is the timing resolution.
-        val sequence =
-            javax.sound.midi.Sequence(javax.sound.midi.Sequence.PPQ, conf.midiRes.toInt())
+        val sequence = Sequence(Sequence.PPQ, conf.midiRes.toInt())
+        // Setting our sequence so that the sequencer can run it on synthesizer
+        sequencer.sequence = sequence
 
         val baseNote = 21 // the code of the lowest note on the piano, the A2
-        val timelineSorted = notes.sortedBy { it.pos }
-
         // Creating a track on our sequence upon which MIDI events would be placed
         val track = sequence.createTrack()
+        val tempo = encodeTempo(bpm2Tempo(conf.bpm.toFloat()))
+        val timeSignature = encodeTimeSignature(
+            conf.timeSignatureDenominator,
+            conf.timeSignatureNominator
+        )
+        val trackName = "Generated Track"
+        track.add(makeMetaEvent(TRACK_NAME_MIDI_CODE, trackName.toByteArray(), trackName.length, 0))
+        track.add(makeMetaEvent(SET_TEMPO_MIDI_CODE, tempo, tempo.size, 0))
+        track.add(makeMetaEvent(TIME_SIGNATURE_MIDI_CODE, timeSignature, timeSignature.size, 0))
+
         // Add events
+        val timelineSorted = notes.sortedBy { it.pos }
         timelineSorted.forEach { event ->
             track.add(
                 makeEvent(
                     if (event.type) ShortMessage.NOTE_ON else ShortMessage.NOTE_OFF,
                     //event.hand,
                     event.key + baseNote,
-                    event.pos.div(playSpeed).roundToInt()
+                    event.pos.div(playSpeed / 6).roundToInt()
                 )
             )
         }
 
-        // Setting our sequence so that the sequencer can run it on synthesizer
-        sequencer.sequence = sequence
 
-        // Specifies the beat rate in beats per minute.
-        sequencer.tempoInBPM = conf.bpm.toFloat()
-
-        println("storing midi file")
         val file = File("./output/midi.mid")
         MidiSystem.write(sequence, 0, file)
         exitProcess(1)
@@ -443,7 +480,42 @@ class VidToMid(
                 Imgproc.rectangle(img, note, Scalar(255.0, 255.0, 255.0), Core.FILLED)
             }
         }
+
         saveImage("./output/detectedNotes.bmp", img)
+    }
+
+    fun rasterizeNotes() {
+        if (offsets.isEmpty()) {
+            val loadedOffsets = FileInputStream("output/offsets.txt").use {
+                it.readAllBytes().decodeToString().splitToSequence(", ")
+                    .map { elem -> elem.toDouble() }
+                    .toList()
+            }
+            offsets.addAll(loadedOffsets)
+        }
+
+        val img = loadImage("./output/detectedNotes.bmp")
+        val bps = conf.bpm / 60.0
+        val pxPerSec = median(offsets) * fps()
+        println("pixel per second $pxPerSec")
+        val pxPerBeat = pxPerSec / bps
+
+        val offset = 1755
+        println("px: ${pxPerBeat.roundToInt()}")
+        val max = img.height().minus(offset).div(pxPerBeat)
+        for (i in 0 until max.toInt()) {
+            val tl = Point(
+                0.0,
+                -offset + img.height() - (i * pxPerBeat).coerceAtMost(img.height().toDouble())
+            )
+            val br = Point(
+                img.width().toDouble(),
+                -offset + img.height() - (i * pxPerBeat).coerceAtMost(img.height().toDouble())
+            )
+            println("tl $tl br $br")
+            Imgproc.line(img, tl, br, Scalar(0.0, 255.0, 0.0), 1)
+        }
+        saveImage("output/beatImage.bmp", img)
     }
 
     private fun getHand(colors: DoubleArray): Int {
@@ -465,37 +537,54 @@ class VidToMid(
         return MidiEvent(a, tick.toLong())
     }
 
-
-    private fun renderLines(img: Mat) {
-        val keyBorders = mutableListOf<Pair<Double, Double>>()
-        val (_, keyboardWidth) = initKeys(keyBorders)
-        val pixelsPerInch = img.width() / keyboardWidth
-        keyBorders.replaceAll { old ->
-            Pair(
-                old.first * pixelsPerInch,
-                ((old.second * pixelsPerInch).coerceAtMost(img.width().toDouble()))
-            )
+    /**
+     * source: https://stackoverflow.com/a/58476094
+     */
+    private fun makeMetaEvent(
+        type: Int,
+        data: ByteArray,
+        length: Int,
+        instant: Long
+    ): MidiEvent {
+        val metaMessage = MetaMessage()
+        try {
+            metaMessage.setMessage(type, data, length)
+        } catch (e: InvalidMidiDataException) {
         }
+        return MidiEvent(metaMessage, instant)
+    }
 
-        val top = (img.height() - 1).toDouble()
-        val widthWhite = keyBorders.maxOf { it.second - it.first }
-        tuneKeyBorders(keyBorders)
-        keyBorders.forEach { (left, right) ->
-            if ((right - left) > widthWhite * 0.8) {
-                Imgproc.rectangle(
-                    img,
-                    Point(left, 0.0),
-                    Point(right, top),
-                    Scalar(0.0, 255.0, 0.0),
-                    1
-                )
-            }
-        }
+    private fun bpm2Tempo(bpm: Float): Int {
+        return (60_000_000 / bpm).toInt()
+    }
 
-        saveImage("output/lines.jpg", img)
+    private fun encodeTempo(tempo: Int): ByteArray {
+        val buffer = ByteBuffer.allocate(4)
+        buffer.order(ByteOrder.BIG_ENDIAN)
+        val bytes = buffer.putInt(tempo).array()
+        return Arrays.copyOfRange(bytes, 1, 4)
+    }
 
-        println("render Lines")
+    private fun encodeTimeSignature(nominator: Int, denominator: Int): ByteArray {
+        if (nominator > 255 || denominator <= 0)
+            throw java.lang.IllegalArgumentException("nominator must be in range [1,255].")
+        if (denominator % 2 != 0)
+            throw java.lang.IllegalArgumentException("denominator must be a power of two.")
+        if (denominator > 255 || denominator <= 0)
+            throw java.lang.IllegalArgumentException("denominator must be in range [1,255].")
+        val denominatorPower = (31 - Integer.numberOfLeadingZeros(denominator)).toByte()
+        val buffer = ByteBuffer.allocate(4)
+        buffer.order(ByteOrder.BIG_ENDIAN)
+        // numerator, denominator pow: 'n' -> Pow(2, n) = d, MIDI Clocks :'18' = 24, number 1/32 notes per 24 MIDI clocks:'16' = 16'
+        buffer.put(nominator.toByte()).put(denominatorPower).put(24.toByte()).put(22.toByte())
+        return buffer.array()
     }
 
     private data class KeyEvent(val pos: Double, val key: Int, val type: Boolean, val hand: Int)
+
+    companion object {
+        private const val TRACK_NAME_MIDI_CODE = 0x03
+        private const val SET_TEMPO_MIDI_CODE = 0x51
+        private const val TIME_SIGNATURE_MIDI_CODE = 0x58
+    }
 }

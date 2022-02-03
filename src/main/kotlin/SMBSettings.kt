@@ -37,7 +37,13 @@ private const val keyboardDistOrigin = 0.47
 private const val keyboardDistCoef = 0.043
 
 
-class SMBSettings(bpm: Double, midiRes: Double, framesToSkip: Int) : VidSettings(
+class SMBSettings(
+    bpm: Double,
+    midiRes: Double,
+    framesToSkip: Int,
+    timeSignatureNominator: Int,
+    timeSignatureDenominator: Int
+) : VidSettings(
     bpm = bpm,
     midiRes = midiRes,
     framesToSkip = framesToSkip,
@@ -53,5 +59,8 @@ class SMBSettings(bpm: Double, midiRes: Double, framesToSkip: Int) : VidSettings
     keyboardDistCoef = keyboardDistCoef,
     keyboardDistOrigin = keyboardDistOrigin,
     keyDimensions = realKeyDimensions,
-    frameLimits = imageRange
+    frameLimits = imageRange,
+
+    timeSignatureNominator = timeSignatureNominator,
+    timeSignatureDenominator = timeSignatureDenominator,
 )

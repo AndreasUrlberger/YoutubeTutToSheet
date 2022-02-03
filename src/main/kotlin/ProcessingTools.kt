@@ -36,14 +36,12 @@ fun loadImage(imagePath: String): Mat {
 fun adaptThresh(channel: Mat, blockSize: Int, C: Double): Mat {
     val adaptThresh = Mat()
     // BORDER_REPLICATE | #BORDER_ISOLATED
-    println("type before: ${channel.type()}, $channel")
     var converted = Mat()
     if (channel.type() != CV_8UC1) {
         channel.convertTo(converted, CV_8UC1)
     } else {
         converted = channel
     }
-    println("type after: ${converted.type()}, wanted: $CV_8UC1")
 
     Imgproc.adaptiveThreshold(
         converted,
