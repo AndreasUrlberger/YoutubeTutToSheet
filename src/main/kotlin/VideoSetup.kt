@@ -16,6 +16,7 @@ fun main(args: Array<String>) {
     var big = loadImage(args[0])
     //big = big.submat(0, (big.height() * 0.5).toInt(), 0, big.width())
     videoSetup(big)
+
 }
 
 private fun videoSetup(img: Mat) {
