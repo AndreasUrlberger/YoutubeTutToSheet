@@ -147,4 +147,16 @@ private fun createMissingHands(
     }
 }
 
+fun deleteFramesExceptNth(handPositions: HandPositions, framesToSkip: Int) {
+    val frames = handPositions.frames
+    val endPos = frames.size / (framesToSkip + 1)
+    for (index in 0 until endPos) {
+        frames.removeAt(index + 1)
+        frames.removeAt(index + 1)
+    }
 
+    val remaining = frames.size - endPos - 1
+    for (index in 0 until remaining) {
+        frames.removeAt(endPos + 1)
+    }
+}
