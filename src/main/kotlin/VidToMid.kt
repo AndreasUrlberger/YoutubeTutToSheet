@@ -398,7 +398,7 @@ class VidToMid(
                     if (event.type) ShortMessage.NOTE_ON else ShortMessage.NOTE_OFF,
                     event.hand,
                     event.key + baseNote,
-                    event.pos.div(playSpeed / 6).roundToInt()
+                    event.pos.div(playSpeed).roundToInt()
                 )
             )
         }
