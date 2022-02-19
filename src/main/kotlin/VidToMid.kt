@@ -19,7 +19,6 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.system.exitProcess
 
-
 fun main(args: Array<String>) {
     val settings = PietschmannSettings(
         bpm = args[0].toDouble(),
@@ -27,14 +26,15 @@ fun main(args: Array<String>) {
         framesToSkip = 2,
         timeSignatureDenominator = 4,
         timeSignatureNominator = 4,
+        noteHandCoupling = NoteHandCoupling.HandPosDetection
     )
-    val conv = VidToMid("input/Dune_Part2.mp4", settings, true)
-    println("now calculate offset")
+
+    val conv = VidToMid("input/Dune_Part1.mp4", settings, true)
+    /*println("now calculate offset")
     conv.getOffsets()
     println("now merge images")
     conv.mergeImages()
-    println("now detect notes")
-    //conv.rasterizeNotes()
+    println("now detect notes")*/
     conv.imageToMidi()
     conv.release()
 }
@@ -72,13 +72,7 @@ class VidToMid(
 
     fun mergeImages() {
         if (saveToStorage) {
-            offsets.clear()
-            val loadedOffsets = FileInputStream("output/offsets.txt").use {
-                it.readAllBytes().decodeToString().splitToSequence(", ")
-                    .map { elem -> elem.toDouble() }
-                    .toList()
-            }
-            offsets.addAll(loadedOffsets)
+            loadOffsets()
         }
         recMergeImages()
     }
@@ -87,16 +81,19 @@ class VidToMid(
         if (saveToStorage) {
             loadImage("output/appended.bmp").copyTo(appendedImage)
             Imgproc.cvtColor(appendedImage, appendedImage, Imgproc.COLOR_BGR2GRAY)
-
-            offsets.clear()
-            val loadedOffsets = FileInputStream("output/offsets.txt").use {
-                it.readAllBytes().decodeToString().splitToSequence(", ")
-                    .map { elem -> elem.toDouble() }
-                    .toList()
-            }
-            offsets.addAll(loadedOffsets)
+            loadOffsets()
         }
         longImageToMidi()
+    }
+
+    private fun loadOffsets() {
+        offsets.clear()
+        val loadedOffsets = FileInputStream("output/offsets.txt").use {
+            it.readAllBytes().decodeToString().splitToSequence(", ")
+                .map { elem -> elem.toDouble() }
+                .toList()
+        }
+        offsets.addAll(loadedOffsets)
     }
 
     fun renderLines(img: Mat) {
@@ -149,7 +146,9 @@ class VidToMid(
                 ((old.second * pixelsPerInch).coerceAtMost(appendedImage.width().toDouble()))
             )
         }
-        detectNotesInImage(keyBorders)
+        val handPos = loadHandPositions("input/handPos.txt")
+        deleteFramesExceptNth(handPos, conf.framesToSkip)
+        detectNotesInImage(keyBorders, handPos)
 
         // create Timeline
         shiftTimelineToStart(notes)
@@ -220,6 +219,9 @@ class VidToMid(
             it[it.size / 2]
     }
 
+    /**
+     * Always takes one frame then skips conf.framesToSkip frames
+     */
     private fun recMergeImages() {
         if (offsets.isEmpty()) {
             throw IllegalStateException("offsets have not been calculated yet")
@@ -394,7 +396,7 @@ class VidToMid(
             track.add(
                 makeEvent(
                     if (event.type) ShortMessage.NOTE_ON else ShortMessage.NOTE_OFF,
-                    //event.hand,
+                    event.hand,
                     event.key + baseNote,
                     event.pos.div(playSpeed / 6).roundToInt()
                 )
@@ -409,8 +411,10 @@ class VidToMid(
 
     private fun detectNotesInImage(
         keyBorders: List<Pair<Double, Double>>,
+        handPos: HandPositions,
     ) {
         val img = Mat()
+        val cumOffsets = getCumulativeOffsets()
         appendedImage.copyTo(img)
         notes.clear()
         keyBorders.forEachIndexed { keyIndex, border ->
@@ -458,30 +462,59 @@ class VidToMid(
                 }
             }
 
-            val innerNotes = mutableListOf<Rect>()
-            potNotes.forEach { one ->
-                potNotes.forEach { other ->
-                    if (one.contains(other.tl()) && one.contains(other.br())) {
-                        innerNotes.add(other)
-                    }
-                }
-            }
-            potNotes.removeAll(innerNotes)
-            for (note in potNotes) {
-                /*val middleX = ((note.br().y + note.tl().y) / 2).toInt()
-                val middleY = ((note.tl().x + note.br().x) / 2 + border.first - bonusPx).toInt()
-                val hand = getHand(img.get(middleX, middleY))*/
+            removeInnerNotes(potNotes)
 
+            for (note in potNotes) {
                 // We only look at inner contours, so it is safe to extend them by one
                 val down = img.height() - (note.br().y + 1)
                 val up = img.height() - (note.tl().y - 1)
-                notes.add(KeyEvent(down, keyIndex, true, 0))
-                notes.add(KeyEvent(up, keyIndex, false, 0))
+                var handIndex = 0
+
+                if (conf.noteHandCoupling == NoteHandCoupling.HandPosDetection) {
+                    var foundIndex = Utils.binaryGreaterThanSearch(cumOffsets, minValue = down)
+                    if (foundIndex < 0) {
+                        // probably part of the last frame where there is no hand
+                        // data anymore. Just use the last known frame instead.
+                        foundIndex = cumOffsets.size - 1
+                    }
+                    // now decide which hand is most likely to have played that note
+                    val noteXPos = ((borderStart + borderEnd) / 2.0) / img.width()
+                    handIndex = Utils.likeliestHand(
+                        noteXPos,
+                        handPos.getFrame(foundIndex).hands
+                    ).index
+                }
+
+                notes.add(KeyEvent(down, keyIndex, true, handIndex))
+                notes.add(KeyEvent(up, keyIndex, false, handIndex))
                 Imgproc.rectangle(img, note, Scalar(255.0, 255.0, 255.0), Core.FILLED)
             }
         }
 
         saveImage("./output/detectedNotes.bmp", img)
+    }
+
+    private fun getCumulativeOffsets(): MutableList<Double> {
+        val cumulativeOffset = ArrayList<Double>(offsets.size)
+        cumulativeOffset.add(0, offsets[0])
+
+        for (index in 1 until offsets.size) {
+            cumulativeOffset.add(offsets[index] + cumulativeOffset[index - 1])
+        }
+
+        return cumulativeOffset
+    }
+
+    private fun removeInnerNotes(potNotes: MutableList<Rect>) {
+        val innerNotes = mutableListOf<Rect>()
+        potNotes.forEach { one ->
+            potNotes.forEach { other ->
+                if (one.contains(other.tl()) && one.contains(other.br())) {
+                    innerNotes.add(other)
+                }
+            }
+        }
+        potNotes.removeAll(innerNotes)
     }
 
     fun rasterizeNotes() {
@@ -529,11 +562,12 @@ class VidToMid(
 
     private fun makeEvent(
         command: Int,
+        hand: Int,
         note: Int,
         tick: Int
     ): MidiEvent {
         val a = ShortMessage()
-        a.setMessage(command, 0, note, 100)
+        a.setMessage(command, hand, note, 100)
         return MidiEvent(a, tick.toLong())
     }
 

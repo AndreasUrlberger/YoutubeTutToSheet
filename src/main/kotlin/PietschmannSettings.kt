@@ -42,7 +42,8 @@ class PietschmannSettings(
     midiRes: Double = 480.0,
     framesToSkip: Int = 2,
     timeSignatureNominator: Int,
-    timeSignatureDenominator: Int
+    timeSignatureDenominator: Int,
+    noteHandCoupling: NoteHandCoupling = NoteHandCoupling.HandPosDetection
 ) : VidSettings(
     bpm = bpm,
     midiRes = midiRes,
@@ -52,6 +53,8 @@ class PietschmannSettings(
     keyStartNum = -3,
     keyEnd = 'c',
     keyEndNum = 5,
+
+    noteHandCoupling = noteHandCoupling,
 
     prepareImage = prepareImage,
     extractNotes = extractNotes,

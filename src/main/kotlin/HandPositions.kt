@@ -7,11 +7,32 @@ import java.io.FileNotFoundException
 import java.nio.file.Files
 import kotlin.io.path.Path
 
+enum class KeypointIndex(val index: Int) {
+    WRIST(0),
+    THUMB_CMC(1),
+    THUMB_MCP(2),
+    THUMB_IP(3),
+    THUMB_TIP(4),
+    INDEX_FINGER_MCP(5),
+    INDEX_FINGER_PIP(6),
+    INDEX_FINGER_DIP(7),
+    INDEX_FINGER_TIP(8),
+    MIDDLE_FINGER_MCP(9),
+    MIDDLE_FINGER_PIP(10),
+    MIDDLE_FINGER_DIP(11),
+    MIDDLE_FINGER_TIP(12),
+    RING_FINGER_MCP(13),
+    RING_FINGER_PIP(14),
+    RING_FINGER_DIP(15),
+    RING_FINGER_TIP(16),
+    PINKY_FINGER_MCP(17),
+    PINKY_FINGER_PIP(18),
+    PINKY_FINGER_DIP(19),
+    PINKY_FINGER_TIP(20),
+}
 
 @Serializable
-data class HandPositions(
-    val frames: MutableList<MutableList<Hand>>, val pxOffset: MutableList<Int> = mutableListOf()
-) {
+data class HandPositions(val frames: MutableList<MutableList<Hand>>) {
     fun getFrame(index: Int) = HandFrame(frames[index])
     fun size() = frames.size
 }
@@ -159,4 +180,15 @@ fun deleteFramesExceptNth(handPositions: HandPositions, framesToSkip: Int) {
     for (index in 0 until remaining) {
         frames.removeAt(endPos + 1)
     }
+}
+
+fun getFingerTips(hand: Hand): List<HandKeypoint> {
+    val landmarks = hand.landmarks
+    return listOf(
+        landmarks[KeypointIndex.THUMB_TIP.index],
+        landmarks[KeypointIndex.INDEX_FINGER_TIP.index],
+        landmarks[KeypointIndex.MIDDLE_FINGER_TIP.index],
+        landmarks[KeypointIndex.RING_FINGER_TIP.index],
+        landmarks[KeypointIndex.PINKY_FINGER_TIP.index],
+    )
 }
