@@ -14,7 +14,6 @@ import java.nio.file.Files
 import java.util.*
 import javax.sound.midi.*
 import kotlin.io.path.Path
-import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.system.exitProcess
@@ -29,9 +28,9 @@ fun main(args: Array<String>) {
         noteHandCoupling = NoteHandCoupling.HandPosDetection
     )
 
-    val conv = VidToMid("input/Dune_Part1.mp4", settings, true)
+    val conv = VidToMid("input/HisDarkMaterials.mp4", settings, true)
     /*println("now calculate offset")
-    conv.getOffsets()
+    conv.getVideoOffsets()
     println("now merge images")
     conv.mergeImages()
     println("now detect notes")*/
@@ -64,10 +63,6 @@ class VidToMid(
 
     fun release() {
         cap.release()
-    }
-
-    fun getOffsets() {
-        getVideoOffsets()
     }
 
     fun mergeImages() {
@@ -147,7 +142,7 @@ class VidToMid(
             )
         }
         val handPos = loadHandPositions("input/handPos.txt")
-        deleteFramesExceptNth(handPos, conf.framesToSkip)
+        //deleteFramesExceptNth(handPos, conf.framesToSkip)
         detectNotesInImage(keyBorders, handPos)
 
         // create Timeline
@@ -162,7 +157,7 @@ class VidToMid(
         createMidi(playSpeed)
     }
 
-    private fun getVideoOffsets() {
+    fun getVideoOffsets() {
         cap.set(CAP_PROP_POS_FRAMES, 0.0) // make sure we are at the start
         offsets.clear()
         val frame = Mat()
@@ -196,7 +191,8 @@ class VidToMid(
             }
         }
         val median = median(offsets)
-        offsets.replaceAll { value -> if (abs(value - median) > median * conf.maxImageDiff) median else value }
+        //offsets.replaceAll { value -> if (abs(value - median) > median * conf.maxImageDiff) median else value }
+        offsets.replaceAll { value -> if (value != median) median else value }
 
         if (saveToStorage) {
             FileOutputStream("./output/offsets.txt").use {
@@ -240,6 +236,7 @@ class VidToMid(
             getFrame(small)
             Imgproc.cvtColor(small, small, Imgproc.COLOR_BGR2GRAY)
             adaptThresh(small, 7, 7.0).copyTo(small)
+            // endRow and endColumn are excluded
             val cut = small.submat(0, offset.plus(1).roundToInt(), 0, small.width())
             frames.add(cut)
             skipFrames(conf.framesToSkip, small)
@@ -413,8 +410,11 @@ class VidToMid(
         keyBorders: List<Pair<Double, Double>>,
         handPos: HandPositions,
     ) {
+        val items: MutableList<Pair<Rect, Int>> = mutableListOf()
+
         val img = Mat()
-        val cumOffsets = getCumulativeOffsets()
+        offsets.replaceAll { value -> value + 1 }
+        val cumOffsets = getCumulativeOffsets(conf.framesToSkip)
         appendedImage.copyTo(img)
         notes.clear()
         keyBorders.forEachIndexed { keyIndex, border ->
@@ -471,7 +471,7 @@ class VidToMid(
                 var handIndex = 0
 
                 if (conf.noteHandCoupling == NoteHandCoupling.HandPosDetection) {
-                    var foundIndex = Utils.binaryGreaterThanSearch(cumOffsets, minValue = down)
+                    var foundIndex = Utils.binaryGreaterThanSearch(cumOffsets, minValue = down - 530)
                     if (foundIndex < 0) {
                         // probably part of the last frame where there is no hand
                         // data anymore. Just use the last known frame instead.
@@ -487,19 +487,63 @@ class VidToMid(
 
                 notes.add(KeyEvent(down, keyIndex, true, handIndex))
                 notes.add(KeyEvent(up, keyIndex, false, handIndex))
-                Imgproc.rectangle(img, note, Scalar(255.0, 255.0, 255.0), Core.FILLED)
+                items.add(Pair(note, handIndex))
             }
         }
 
-        saveImage("./output/detectedNotes.bmp", img)
+        val out = Mat()
+        Imgproc.cvtColor(img, out, Imgproc.COLOR_GRAY2BGR)
+
+        // show hand span
+        val division = 11
+        for (px in 0 until out.height() / division) {
+            if(px % 194 == 0){
+                print("")
+            }
+            val from = px * division
+            val to = px.plus(1).times(division).coerceAtMost(out.height())
+            var foundIndex = Utils.binaryGreaterThanSearch(cumOffsets, minValue = out.height().minus(from).toDouble())
+            if (foundIndex < 0) {
+                // probably part of the last frame where there is no hand
+                // data anymore. Just use the last known frame instead.
+                foundIndex = cumOffsets.size - 1
+            }
+
+            val handFrame = handPos.getFrame(foundIndex)
+            handFrame.hands.forEach { hand ->
+                val color = if (hand.index % 2 == 0) Scalar(255.0, 0.0, 0.0) else Scalar(0.0, 255.0, 0.0)
+                val xMin = hand.landmarks.minOf { h -> h.x }
+                val xMax = hand.landmarks.maxOf { h -> h.x }
+
+                val xFrom = xMin.times(out.width()).toInt()
+                val xTo = xMax.times(out.width()).toInt()
+                val rect = Rect(xFrom, from - 530, xTo - xFrom, to - from)
+                Imgproc.rectangle(out, rect, color, 2)
+            }
+        }
+
+        items.forEach { (note, handIndex) ->
+            val color = if (handIndex % 2 == 0) Scalar(255.0, 0.0, 0.0) else Scalar(0.0, 255.0, 0.0)
+            Imgproc.rectangle(out, note, color, Core.FILLED)
+        }
+
+        saveImage("./output/detectedNotes.bmp", out)
     }
 
-    private fun getCumulativeOffsets(): MutableList<Double> {
-        val cumulativeOffset = ArrayList<Double>(offsets.size)
-        cumulativeOffset.add(0, offsets[0])
+    private fun getCumulativeOffsets(subSteps: Int = 0): MutableList<Double> {
+        val cumulativeOffset = ArrayList<Double>(offsets.size * (subSteps + 1))
+        cumulativeOffset.add(0, 0.0)
 
-        for (index in 1 until offsets.size) {
-            cumulativeOffset.add(offsets[index] + cumulativeOffset[index - 1])
+        for (index in 0 until offsets.size) {
+            val upper = offsets[index] + cumulativeOffset[index * (subSteps + 1)]
+            if (subSteps != 0) {
+                val lower = cumulativeOffset[index * (subSteps + 1)]
+                val difference = offsets[index]
+                for (subStep in 1..subSteps) {
+                    cumulativeOffset.add(lower + difference * subStep / (subSteps + 1))
+                }
+            }
+            cumulativeOffset.add(upper)
         }
 
         return cumulativeOffset

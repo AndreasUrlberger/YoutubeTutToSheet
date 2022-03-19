@@ -2,7 +2,7 @@ import kotlin.math.abs
 
 object Utils {
     @JvmStatic
-    public fun binaryGreaterThanSearch(
+    fun binaryGreaterThanSearch(
         list: List<Double>,
         fromIndex: Int = 0,
         toIndex: Int = list.size,
@@ -26,7 +26,7 @@ object Utils {
         }
 
         // low and high should end up on the same value
-        return if (list[low] > minValue) {
+        return if (list[low] >= minValue) {
             low
         } else {
             -1
@@ -34,7 +34,7 @@ object Utils {
     }
 
     @JvmStatic
-    public fun likeliestHand(xPosNote: Double, hands: List<Hand>): Hand {
+    fun likeliestHand(xPosNote: Double, hands: List<Hand>): Hand {
         if (hands.isEmpty()) {
             throw IllegalArgumentException("hands list cannot be empty")
         }

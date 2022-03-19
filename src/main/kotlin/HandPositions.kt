@@ -35,6 +35,11 @@ enum class KeypointIndex(val index: Int) {
 data class HandPositions(val frames: MutableList<MutableList<Hand>>) {
     fun getFrame(index: Int) = HandFrame(frames[index])
     fun size() = frames.size
+
+    // Otherwise the toString recursively calls its child data classes which can slow down the debugger immensely
+    override fun toString(): String {
+        return "${size()} hand frames"
+    }
 }
 
 @Serializable
@@ -65,6 +70,7 @@ fun loadHandPositions(location: String): HandPositions {
         throw FileNotFoundException("Could not find hand position file at \"$location\"")
 
     val handPos = Json.decodeFromStream<HandPositions>(FileInputStream("input/handPos.txt"))
+    // TODO: Fix in VSCode: Frame count of handPositions must match frame count of input video, or set indices to the hand frames to make the relation between handpos and notepos unambiguous.
     fillHoles(handPos)
     return handPos
 }
