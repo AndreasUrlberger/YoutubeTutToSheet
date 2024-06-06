@@ -1,1 +1,1 @@
-Converts Synthesia youtube piano tutorials to midi files using clasical computer vision. Working quite well, requires quite some configuration for each video though. Can also integrate hand positions from imported hand poses and use them to add hand information to the midi files.
+Converts Synthesia youtube piano tutorials to midi files using clasical computer vision. Works quite well, requires quite some configuration for each video, though. Can also integrate hand positions from imported hand poses and use them to add hand information to the midi files.
